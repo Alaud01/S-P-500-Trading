@@ -2,7 +2,25 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime
 import numpy as np
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
 
+# --- Sentiment Analysis with FinBERT ---
+print("Loading FinBERT model for sentiment analysis...")
+tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
+model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
+
+def get_sentiment(text):
+    """Calculates sentiment score for a given text using FinBERT."""
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    scores = torch.nn.functional.softmax(outputs.logits, dim=-1)
+    # Score is positive - negative sentiment
+    sentiment_score = scores[:, 0].item() - scores[:, 1].item()
+    return sentiment_score
+
+# --- Data Loading and Processing ---
 # Read the main S&P 500 headlines dataset
 print("Loading S&P 500 headlines data...")
 df = pd.read_csv('sp500 headlines 2008 to 2024.csv')
@@ -11,6 +29,21 @@ print(df.head())
 
 # Convert Date column to datetime
 df['Date'] = pd.to_datetime(df['Date'])
+
+# Calculate sentiment for each headline
+print("Calculating sentiment for headlines (this may take a while)...")
+# Limit to a subset for faster processing if needed, e.g., df.head(1000)
+df['Sentiment'] = df['Title'].apply(get_sentiment)
+
+# Aggregate sentiment per day
+print("Aggregating daily sentiment scores...")
+daily_sentiment = df.groupby('Date')['Sentiment'].mean().reset_index()
+
+# Drop the original headlines to keep one row per day
+df_daily = df.drop(['Title', 'Sentiment'], axis=1).drop_duplicates(subset=['Date']).reset_index(drop=True)
+
+# Merge the aggregated sentiment back into the daily data
+df = pd.merge(df_daily, daily_sentiment, on='Date', how='left')
 
 # Get unique dates for volume data
 unique_dates = df['Date'].unique()
@@ -73,8 +106,8 @@ df.drop('Year_Month', axis=1, inplace=True)
 
 # Display results
 print(f"\nFinal dataset shape: {df.shape}")
-print("\nSample of enhanced dataset:")
-print(df[['Title', 'Date', 'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate']].head(10))
+print("\nSample of enhanced dataset with Sentiment:")
+print(df[['Date', 'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'Sentiment']].head(10))
 
 # Display data info
 print(f"\nData summary:")
@@ -83,6 +116,7 @@ print(f"- Date range: {df['Date'].min()} to {df['Date'].max()}")
 print(f"- Volume data availability: {df['Volume'].notna().sum()}/{len(df)} records")
 print(f"- Interest rate data availability: {df['Interest_Rate'].notna().sum()}/{len(df)} records")
 print(f"- Inflation rate data availability: {df['Inflation_Rate'].notna().sum()}/{len(df)} records")
+print(f"- Sentiment data availability: {df['Sentiment'].notna().sum()}/{len(df)} records")
 
 # Save the enhanced dataset
 output_filename = 'enhanced_sp500_dataset.csv'
@@ -96,3 +130,5 @@ print(f"\nInterest Rate statistics:")
 print(df['Interest_Rate'].describe())
 print(f"\nInflation Rate statistics:")
 print(df['Inflation_Rate'].describe())
+print(f"\nSentiment statistics:")
+print(df['Sentiment'].describe())

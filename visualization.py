@@ -54,6 +54,9 @@ class SP500DataAnalyzer:
         self.df['Returns'] = self.df['CP'].pct_change()
         self.df['Log_Returns'] = np.log(self.df['CP'] / self.df['CP'].shift(1))
         
+        # Smooth sentiment score
+        self.df['Sentiment_MA_5'] = self.df['Sentiment'].rolling(window=5).mean()
+        
         # Moving averages
         self.df['MA_5'] = self.df['CP'].rolling(window=5).mean()
         self.df['MA_20'] = self.df['CP'].rolling(window=20).mean()
@@ -137,11 +140,12 @@ class SP500DataAnalyzer:
     def create_time_series_plots(self):
         """Create comprehensive time series visualizations"""
         fig = make_subplots(
-            rows=4, cols=1,
+            rows=5, cols=1,
             subplot_titles=('S&P 500 Price with Moving Averages', 'Trading Volume', 
-                            'Interest Rate', 'Inflation Rate'),
+                            'Interest Rate', 'Inflation Rate', 'News Sentiment'),
             vertical_spacing=0.08,
             specs=[[{"secondary_y": False}],
+                    [{"secondary_y": False}],
                     [{"secondary_y": False}],
                     [{"secondary_y": False}],
                     [{"secondary_y": False}]]
@@ -169,19 +173,24 @@ class SP500DataAnalyzer:
         fig.add_trace(go.Scatter(x=self.df['Date'], y=self.df['Inflation_Rate'], 
                                 name='Inflation Rate %', line=dict(color='darkgreen')), row=4, col=1)
         
-        fig.update_layout(height=1200, title_text="S&P 500 Data Time Series Analysis", showlegend=True)
-        fig.update_xaxes(title_text="Date", row=4, col=1)
+        # News Sentiment
+        fig.add_trace(go.Scatter(x=self.df['Date'], y=self.df['Sentiment_MA_5'], 
+                                name='Sentiment (5-day MA)', line=dict(color='orange')), row=5, col=1)
+        
+        fig.update_layout(height=1400, title_text="S&P 500 Data Time Series Analysis", showlegend=True)
+        fig.update_xaxes(title_text="Date", row=5, col=1)
         fig.update_yaxes(title_text="Price ($)", row=1, col=1)
         fig.update_yaxes(title_text="Volume (Billions)", row=2, col=1)
         fig.update_yaxes(title_text="Rate (%)", row=3, col=1)
         fig.update_yaxes(title_text="Rate (%)", row=4, col=1)
+        fig.update_yaxes(title_text="Sentiment Score", row=5, col=1)
         
         fig.show()
         
     def create_correlation_analysis(self):
         """Analyze correlations between variables"""
         # Select numeric columns for correlation
-        corr_columns = ['CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 
+        corr_columns = ['CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'Sentiment_MA_5',
                         'Returns', 'Volatility_20', 'RSI', 'MACD']
         
         corr_data = self.df[corr_columns].corr()
@@ -370,39 +379,23 @@ class SP500DataAnalyzer:
             self.df[f'Returns_Lag_{lag}'] = self.df['Returns'].shift(lag)
             self.df[f'Volume_Lag_{lag}'] = self.df['Volume'].shift(lag)
         
-        # Create future targets (1 week and 1 month ahead)
-        self.df['Price_1Week_Future'] = self.df['CP'].shift(-5)  # 5 trading days
+        # Create future target for classification
         self.df['Price_1Month_Future'] = self.df['CP'].shift(-20)  # 20 trading days
-        self.df['Return_1Week_Future'] = (self.df['Price_1Week_Future'] / self.df['CP']) - 1
-        self.df['Return_1Month_Future'] = (self.df['Price_1Month_Future'] / self.df['CP']) - 1
+        self.df['Direction_1Month_Future'] = (self.df['Price_1Month_Future'] > self.df['CP']).astype(int)
         
         # Feature list for prediction
         feature_columns = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate',
+            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'Sentiment_MA_5',
             'MA_5', 'MA_20', 'MA_50', 'RSI', 'MACD', 'MACD_Signal',
             'BB_Position', 'BB_Width', 'Volatility_20', 'Volume_Ratio',
             'Price_Change_5d', 'Price_Change_20d'
         ] + [f'Price_Lag_{lag}' for lag in lags] + [f'Returns_Lag_{lag}' for lag in lags]
         
         # Remove rows with NaN values for feature analysis
-        feature_df = self.df[feature_columns + ['Return_1Week_Future', 'Return_1Month_Future']].dropna()
+        feature_df = self.df[feature_columns + ['Direction_1Month_Future']].dropna()
         
         print(f"Available complete records for modeling: {len(feature_df)}")
         print(f"Features available: {len(feature_columns)}")
-        
-        # Feature importance analysis using correlation with future returns
-        correlations_1week = feature_df[feature_columns].corrwith(feature_df['Return_1Week_Future'])
-        correlations_1month = feature_df[feature_columns].corrwith(feature_df['Return_1Month_Future'])
-        
-        print(f"\nTop 10 Features Correlated with 1-Week Future Returns:")
-        print("-" * 55)
-        for feature, corr in correlations_1week.abs().sort_values(ascending=False).head(10).items():
-            print(f"{feature:25}: {correlations_1week[feature]:6.3f}")
-            
-        print(f"\nTop 10 Features Correlated with 1-Month Future Returns:")
-        print("-" * 55)
-        for feature, corr in correlations_1month.abs().sort_values(ascending=False).head(10).items():
-            print(f"{feature:25}: {correlations_1month[feature]:6.3f}")
         
         # Save processed data for modeling
         self.df.to_csv('sp500_features_for_prediction.csv', index=False)
