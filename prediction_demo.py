@@ -61,7 +61,7 @@ class SP500PredictionDemo:
             'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate',
             'MA_5', 'MA_20', 'MA_50', 'RSI', 'MACD', 'MACD_Signal',
             'BB_Position', 'BB_Width', 'Volatility_20', 'Volume_Ratio',
-            'Price_Change_5d', 'Price_Change_20d'
+            'Price_Change_5d', 'Price_Change_20d', 'Sentiment_MA_5'
         ]
         
         lag_features = [f'Price_Lag_{lag}' for lag in [1, 5, 10, 20]] + \
@@ -71,13 +71,14 @@ class SP500PredictionDemo:
         
         lstm_features = [
             'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate',
-            'RSI', 'MACD', 'Volatility_20', 'BB_Position'
+            'RSI', 'MACD', 'Volatility_20', 'BB_Position', 'Sentiment_MA_5'
         ]
         
         # Get the last 60 days for LSTM sequence
         sequence_length = 60
         if len(df) >= sequence_length:
-            lstm_sequence = df[lstm_features].iloc[-sequence_length:].values
+            lstm_sequence_df = df[lstm_features].iloc[-sequence_length:]
+            lstm_sequence = lstm_sequence_df.values
         else:
             print("Warning: Not enough data for LSTM sequence")
             return None, None, None
@@ -94,29 +95,34 @@ class SP500PredictionDemo:
         
         # XGBoost prediction
         xgb_scaled = self.scalers['xgboost'].transform(xgb_features)
-        xgb_pred = self.models['xgboost'].predict(xgb_scaled)[0]
-        predictions['XGBoost'] = xgb_pred
+        xgb_pred_proba = self.models['xgboost'].predict_proba(xgb_scaled)[0]
+        predictions['XGBoost'] = xgb_pred_proba[1]
         
         # Linear prediction
         linear_scaled = self.scalers['linear'].transform(xgb_features)
-        linear_pred = self.models['linear'].predict(linear_scaled)[0]
-        predictions['Linear'] = linear_pred
+        linear_pred_proba = self.models['linear'].predict_proba(linear_scaled)[0]
+        predictions['Linear'] = linear_pred_proba[1]
         
         # LSTM prediction
         lstm_scaled = self.scalers['lstm'].transform(lstm_sequence.reshape(-1, lstm_sequence.shape[-1]))
         lstm_scaled = lstm_scaled.reshape(1, lstm_sequence.shape[0], lstm_sequence.shape[1])
-        lstm_pred = self.models['lstm'].predict(lstm_scaled)[0][0]
-        predictions['LSTM'] = lstm_pred
+        lstm_pred_proba = self.models['lstm'].predict(lstm_scaled)[0][0]
+        predictions['LSTM'] = lstm_pred_proba
         
         # Meta-model prediction
-        meta_features = np.array([[lstm_pred, xgb_pred, linear_pred]])
-        # Add additional features
-        additional_features = ['CP', 'Volatility_20', 'RSI', 'Interest_Rate', 'Inflation_Rate']
-        additional_values = latest_data[additional_features].values
-        meta_features = np.column_stack([meta_features, additional_values])
+        base_model_preds = np.array([[
+            predictions['LSTM'],
+            predictions['XGBoost'],
+            predictions['Linear']
+        ]])
         
-        meta_pred = self.models['meta'].predict(meta_features)[0]
-        predictions['Meta-Model'] = meta_pred
+        additional_features_list = ['CP', 'Volatility_20', 'RSI', 'Interest_Rate', 'Inflation_Rate', 'Sentiment_MA_5']
+        additional_values = latest_data[additional_features_list].values
+        
+        meta_features = np.column_stack([base_model_preds, additional_values])
+        
+        meta_pred_proba = self.models['meta'].predict_proba(meta_features)[0]
+        predictions['Meta-Model'] = meta_pred_proba[1]
         
         return predictions
         
@@ -125,61 +131,41 @@ class SP500PredictionDemo:
         print(f"\nLatest S&P 500 Price: ${latest_data['CP'].iloc[0]:,.2f}")
         print(f"Date: {latest_data['Date'].iloc[0].strftime('%Y-%m-%d')}")
         
-        print(f"\nPredicted 1-Month Returns:")
-        print("-" * 40)
-        for model, pred in predictions.items():
-            print(f"{model:12}: {pred*100:8.3f}%")
+        print(f"\nPredicted 1-Month Direction & Confidence:")
+        print("-" * 50)
+        for model, proba in predictions.items():
+            direction = "Up" if proba > 0.5 else "Down"
+            confidence = proba if direction == "Up" else 1 - proba
+            print(f"{model:12}: {direction:5} (Confidence: {confidence:.2%})")
             
-        print(f"\nPredicted 1-Month Price:")
-        print("-" * 40)
-        current_price = latest_data['CP'].iloc[0]
-        for model, pred in predictions.items():
-            predicted_price = current_price * (1 + pred)
-            print(f"{model:12}: ${predicted_price:10,.2f}")
-            
-        # Calculate ensemble prediction (simple average)
-        ensemble_pred = np.mean(list(predictions.values()))
-        ensemble_price = current_price * (1 + ensemble_pred)
-        print(f"\nEnsemble Average:")
-        print(f"Return: {ensemble_pred*100:8.3f}%")
-        print(f"Price:  ${ensemble_price:10,.2f}")
+        print("-" * 50)
+        final_prediction = predictions['Meta-Model']
+        final_direction = "Up" if final_prediction > 0.5 else "Down"
+        final_confidence = final_prediction if final_direction == "Up" else 1 - final_prediction
+        print(f"Final Verdict (Meta-Model): {final_direction} with {final_confidence:.2%} confidence.")
         
-    def plot_prediction_comparison(self, predictions, latest_data):
+    def plot_prediction_comparison(self, predictions):
         """Plot comparison of different model predictions"""
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        fig, ax = plt.subplots(figsize=(12, 7))
         
-        # Bar plot of returns
         models = list(predictions.keys())
-        returns = [pred * 100 for pred in predictions.values()]
+        probabilities = list(predictions.values())
         
-        bars = ax1.bar(models, returns, color=['blue', 'green', 'red', 'purple', 'orange'])
-        ax1.set_title('Predicted 1-Month Returns by Model')
-        ax1.set_ylabel('Return (%)')
-        ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+        colors = ['#2ECC71' if p > 0.5 else '#E74C3C' for p in probabilities]
         
-        # Add value labels on bars
-        for bar, ret in zip(bars, returns):
-            height = bar.get_height()
-            ax1.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{ret:.2f}%', ha='center', va='bottom' if height > 0 else 'top')
-        
-        # Bar plot of prices
-        current_price = latest_data['CP'].iloc[0]
-        prices = [current_price * (1 + pred) for pred in predictions.values()]
-        
-        bars2 = ax2.bar(models, prices, color=['blue', 'green', 'red', 'purple', 'orange'])
-        ax2.set_title('Predicted 1-Month S&P 500 Price by Model')
-        ax2.set_ylabel('Price ($)')
-        ax2.axhline(y=current_price, color='black', linestyle='--', alpha=0.7, label='Current Price')
+        bars = ax.bar(models, probabilities, color=colors)
+        ax.set_title('Model Prediction Probabilities for S&P 500 Going Up')
+        ax.set_ylabel('Probability')
+        ax.set_ylim(0, 1)
+        ax.axhline(y=0.5, color='black', linestyle='--', alpha=0.7, label='Decision Boundary (0.5)')
         
         # Add value labels on bars
-        for bar, price in zip(bars2, prices):
+        for bar, prob in zip(bars, probabilities):
             height = bar.get_height()
-            ax2.text(bar.get_x() + bar.get_width()/2., height,
-                    f'${price:,.0f}', ha='center', va='bottom' if height > current_price else 'top')
+            ax.text(bar.get_x() + bar.get_width() / 2., height,
+                    f'{prob:.2%}', ha='center', va='bottom')
         
-        ax2.legend()
-        
+        ax.legend()
         plt.tight_layout()
         plt.show()
         
@@ -189,49 +175,30 @@ class SP500PredictionDemo:
         print("PREDICTION CONFIDENCE ANALYSIS")
         print("="*60)
         
-        returns = list(predictions.values())
+        directions = {model: "Up" if prob > 0.5 else "Down" for model, prob in predictions.items()}
         
-        # Calculate statistics
-        mean_return = np.mean(returns)
-        std_return = np.std(returns)
-        min_return = np.min(returns)
-        max_return = np.max(returns)
-        range_return = max_return - min_return
+        up_votes = sum(1 for d in directions.values() if d == "Up")
+        down_votes = len(directions) - up_votes
         
-        print(f"Mean Prediction: {mean_return*100:.3f}%")
-        print(f"Standard Deviation: {std_return*100:.3f}%")
-        print(f"Range: {range_return*100:.3f}% ({min_return*100:.3f}% to {max_return*100:.3f}%)")
+        print(f"Model Agreement:")
+        print(f"  Models predicting UP:   {up_votes}")
+        print(f"  Models predicting DOWN: {down_votes}")
         
-        # Confidence assessment
-        if range_return < 0.02:  # Less than 2% range
+        if up_votes == len(directions) or down_votes == len(directions):
+            confidence = "VERY HIGH"
+            reason = "All models are in perfect agreement."
+        elif up_votes > down_votes and down_votes <= 1:
             confidence = "HIGH"
-            reason = "Models are in strong agreement"
-        elif range_return < 0.05:  # Less than 5% range
+            reason = "Strong majority agreement for an UP trend."
+        elif down_votes > up_votes and up_votes <= 1:
+            confidence = "HIGH"
+            reason = "Strong majority agreement for a DOWN trend."
+        else:
             confidence = "MEDIUM"
-            reason = "Models show moderate agreement"
-        else:
-            confidence = "LOW"
-            reason = "Models show significant disagreement"
+            reason = "Models show some disagreement, final verdict should be treated with caution."
             
-        print(f"\nConfidence Level: {confidence}")
+        print(f"\nOverall Conviction: {confidence}")
         print(f"Reason: {reason}")
-        
-        # Direction agreement
-        positive_predictions = sum(1 for r in returns if r > 0)
-        negative_predictions = len(returns) - positive_predictions
-        
-        print(f"\nDirection Agreement:")
-        print(f"Models predicting UP: {positive_predictions}")
-        print(f"Models predicting DOWN: {negative_predictions}")
-        
-        if positive_predictions > negative_predictions:
-            direction = "BULLISH"
-        elif negative_predictions > positive_predictions:
-            direction = "BEARISH"
-        else:
-            direction = "NEUTRAL"
-            
-        print(f"Overall Direction: {direction}")
         
     def run_demo(self):
         """Run the complete prediction demo"""
@@ -256,7 +223,7 @@ class SP500PredictionDemo:
         self.display_predictions(predictions, latest_data)
         
         # Plot comparison
-        self.plot_prediction_comparison(predictions, latest_data)
+        self.plot_prediction_comparison(predictions)
         
         # Analyze confidence
         self.analyze_prediction_confidence(predictions)

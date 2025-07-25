@@ -134,14 +134,11 @@ class SP500Predictor:
         
         # Build LSTM model
         model = Sequential([
-            LSTM(128, return_sequences=True, input_shape=(self.sequence_length, len(self.lstm_features))),
+            LSTM(100, return_sequences=True, input_shape=(self.sequence_length, len(self.lstm_features))),
             Dropout(0.2),
-            BatchNormalization(),
-            LSTM(64, return_sequences=False),
+            LSTM(50, return_sequences=False),
             Dropout(0.2),
-            BatchNormalization(),
-            Dense(32, activation='relu'),
-            Dropout(0.1),
+            Dense(25, activation='relu'),
             Dense(1, activation='sigmoid')
         ])
         
@@ -310,8 +307,8 @@ class SP500Predictor:
         X_val_scaled = self.scaler.transform(X_val)
         X_test_scaled = self.scaler.transform(X_test)
         
-        # Train Logistic Regression (with L2 regularization)
-        model = LogisticRegression(penalty='l2', C=1.0, random_state=42, solver='liblinear', class_weight='balanced')
+        # Train Logistic Regression (with L1 regularization for feature selection)
+        model = LogisticRegression(penalty='l1', C=1.0, random_state=42, solver='saga', max_iter=1000, class_weight='balanced')
         model.fit(X_train_scaled, y_train)
         
         # Make predictions
@@ -362,31 +359,31 @@ class SP500Predictor:
         lstm_test_size = len(self.models['lstm']['test_pred'])
         
         # Align all predictions to LSTM size (trim from the end)
-        xgb_train_pred = self.models['xgboost']['train_pred'][-lstm_train_size:]
-        xgb_val_pred = self.models['xgboost']['val_pred'][-lstm_val_size:]
-        xgb_test_pred = self.models['xgboost']['test_pred'][-lstm_test_size:]
+        xgb_train_pred_proba = self.models['xgboost']['train_pred_proba'][-lstm_train_size:]
+        xgb_val_pred_proba = self.models['xgboost']['val_pred_proba'][-lstm_val_size:]
+        xgb_test_pred_proba = self.models['xgboost']['test_pred_proba'][-lstm_test_size:]
         
-        linear_train_pred = self.models['linear']['train_pred'][-lstm_train_size:]
-        linear_val_pred = self.models['linear']['val_pred'][-lstm_val_size:]
-        linear_test_pred = self.models['linear']['test_pred'][-lstm_test_size:]
+        linear_train_pred_proba = self.models['linear']['train_pred_proba'][-lstm_train_size:]
+        linear_val_pred_proba = self.models['linear']['val_pred_proba'][-lstm_val_size:]
+        linear_test_pred_proba = self.models['linear']['test_pred_proba'][-lstm_test_size:]
         
         # Get predictions from base models (aligned)
         meta_features_train = np.column_stack([
             self.models['lstm']['train_pred_proba'],
-            xgb_train_pred,
-            linear_train_pred
+            xgb_train_pred_proba,
+            linear_train_pred_proba
         ])
         
         meta_features_val = np.column_stack([
             self.models['lstm']['val_pred_proba'],
-            xgb_val_pred,
-            linear_val_pred
+            xgb_val_pred_proba,
+            linear_val_pred_proba
         ])
         
         meta_features_test = np.column_stack([
             self.models['lstm']['test_pred_proba'],
-            xgb_test_pred,
-            linear_test_pred
+            xgb_test_pred_proba,
+            linear_test_pred_proba
         ])
         
         # Add some original features to meta-model
@@ -408,8 +405,9 @@ class SP500Predictor:
         y_test = self.models['lstm']['test_actual']
         
         # Calculate class weights for meta-model to handle its own training imbalance
-        meta_neg, meta_pos = np.bincount(y_train)
-        if meta_pos > 0:
+        # We use the validation set labels since we are training the meta-model on the validation set predictions
+        meta_neg, meta_pos = np.bincount(y_val)
+        if meta_pos > 0 and meta_neg > 0:
             meta_scale_pos_weight = meta_neg / meta_pos
         else:
             meta_scale_pos_weight = 1
@@ -427,7 +425,7 @@ class SP500Predictor:
             random_state=42
         )
         
-        meta_model.fit(meta_features_train, y_train)
+        meta_model.fit(meta_features_val, y_val)
         
         # Make meta-predictions
         train_meta_pred_proba = meta_model.predict_proba(meta_features_train)[:, 1]
@@ -454,6 +452,9 @@ class SP500Predictor:
             'train_pred': train_meta_pred,
             'val_pred': val_meta_pred,
             'test_pred': test_meta_pred,
+            'train_pred_proba': train_meta_pred_proba,
+            'val_pred_proba': val_meta_pred_proba,
+            'test_pred_proba': test_meta_pred_proba,
             'train_actual': y_train,
             'val_actual': y_val,
             'test_actual': y_test
@@ -500,16 +501,8 @@ class SP500Predictor:
             recall = recall_score(self.meta_model['test_actual'], self.meta_model['test_pred'])
             f1 = f1_score(self.meta_model['test_actual'], self.meta_model['test_pred'])
             
-            # For meta-model, we need its prediction probabilities for ROC AUC
-            test_pred_proba_meta = self.meta_model['model'].predict_proba(
-                np.column_stack([
-                    self.models['lstm']['test_pred_proba'],
-                    self.models['xgboost']['test_pred_proba'][-len(self.models['lstm']['test_pred_proba']):],
-                    self.models['linear']['test_pred_proba'][-len(self.models['lstm']['test_pred_proba']):],
-                    self.df_clean[self.all_features].iloc[-len(self.models['lstm']['test_pred_proba']):][['CP', 'Volatility_20', 'RSI', 'Interest_Rate', 'Inflation_Rate', 'Sentiment_MA_5']].values
-                ])
-            )[:,1]
-            roc_auc = roc_auc_score(self.meta_model['test_actual'], test_pred_proba_meta)
+            # For meta-model, we use its stored prediction probabilities for ROC AUC
+            roc_auc = roc_auc_score(self.meta_model['test_actual'], self.meta_model['test_pred_proba'])
 
             results['meta'] = {
                 'Accuracy': accuracy,
