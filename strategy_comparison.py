@@ -140,10 +140,25 @@ class StrategyComparer:
         trades_this_month = 0
 
         # --- Strategy Parameters ---
-        trade_decision_threshold = 0.985  # Increased from 0.65 to be more selective
+        trade_decision_threshold = 0.82   # Threshold for 20-day moving average
+        sell_threshold = 0.52             # Start selling when prediction < 0.52
+        max_sell_threshold = 0.3          # Sell all when prediction <= 0.3
         max_trades_per_month = 15         # Limit number of trades per month
         min_investment_ratio = 0.2       # At least 20% of available funds
         # --- End of Parameters ---
+
+        # Pre-calculate 20-day moving average of predictions
+        all_predictions = []
+        all_dates = []
+        
+        for date in self.df['Date']:
+            prediction = self.get_model_prediction(date)
+            all_predictions.append(prediction)
+            all_dates.append(date)
+        
+        # Create Series and calculate 20-day moving average
+        prediction_series = pd.Series(all_predictions, index=all_dates)
+        prediction_ma_20 = prediction_series.rolling(window=20, min_periods=1).mean()
 
         for index, row in self.df.iterrows():
             date = row['Date']
@@ -155,14 +170,39 @@ class StrategyComparer:
                 last_cash_injection_period = current_period
                 trades_this_month = 0
 
-            # Get model prediction for the day
-            prediction = self.get_model_prediction(date)
+            # Get 20-day moving average prediction for the day
+            prediction_ma = prediction_ma_20.loc[date]
 
-            # Make investment decision based on prediction and monthly trade limit
-            if prediction > trade_decision_threshold and trades_this_month < max_trades_per_month:
+            # Initialize sell signal for this day
+            model_portfolio.loc[date, 'sell_signal'] = 0
+            model_portfolio.loc[date, 'buy_signal'] = 0
+
+            # Check for sell signal first (priority over buy signals)
+            if prediction_ma < sell_threshold and shares > 0:
+                # Calculate sell percentage based on prediction strength
+                if prediction_ma <= max_sell_threshold:
+                    # Sell all shares
+                    sell_percentage = 1.0
+                else:
+                    # Gradual selling from sell_threshold to max_sell_threshold
+                    sell_percentage = (sell_threshold - prediction_ma) / (sell_threshold - max_sell_threshold)
+                    sell_percentage = min(sell_percentage, 1.0)  # Cap at 100%
+                
+                # Calculate amount to sell
+                shares_to_sell = shares * sell_percentage
+                sell_amount = shares_to_sell * row['CP']
+                
+                # Execute the sale
+                shares -= shares_to_sell
+                accumulated_funds += sell_amount
+                
+                model_portfolio.loc[date, 'sell_signal'] = sell_amount
+
+            # Check for buy signal (only if not selling)
+            elif prediction_ma > trade_decision_threshold and trades_this_month < max_trades_per_month:
                 # Calculate confidence-based investment amount
                 # Scales from 0 to 1 based on how far prediction is from threshold to 1.0
-                confidence_scaler = (prediction - trade_decision_threshold) / (1.0 - trade_decision_threshold)
+                confidence_scaler = (prediction_ma - trade_decision_threshold) / (1.0 - trade_decision_threshold)
                 
                 # Scale investment from min_investment_ratio to 1.0
                 investment_scaler = min_investment_ratio + (confidence_scaler * (1.0 - min_investment_ratio))
@@ -176,10 +216,6 @@ class StrategyComparer:
                     
                     model_portfolio.loc[date, 'buy_signal'] = amount_to_invest
                     trades_this_month += 1
-                else:
-                    model_portfolio.loc[date, 'buy_signal'] = 0
-            else:
-                model_portfolio.loc[date, 'buy_signal'] = 0
 
             # Update portfolio value for the day - ALWAYS calculate this
             current_price = row['CP']
@@ -191,6 +227,45 @@ class StrategyComparer:
             model_portfolio.at[date, 'portfolio_value'] = portfolio_value
 
         self.results['Model'] = model_portfolio
+
+        # --- Monthly Reporting ---
+        print("\n" + "="*80)
+        print("MODEL STRATEGY MONTHLY REPORT")
+        print("="*80)
+
+        # Ensure model_portfolio index is datetime
+        model_portfolio.index = pd.to_datetime(model_portfolio.index)
+
+        # Resample portfolio data to get end-of-month values
+        monthly_portfolio = model_portfolio.resample('M').last()
+        monthly_buys = model_portfolio['buy_signal'].resample('M').sum()
+
+        # Combine into a report
+        report = pd.DataFrame({
+            'Month': monthly_portfolio.index.strftime('%Y-%m'),
+            'Available Cash': monthly_portfolio['cash'],
+            'Invested This Month': monthly_buys,
+            'Portfolio Value': monthly_portfolio['portfolio_value']
+        })
+
+        # Calculate Monthly P/L
+        report['prev_month_value'] = report['Portfolio Value'].shift(1).fillna(0)
+        
+        # Find all injection dates to determine which months got new capital
+        injection_dates = self.df.groupby(self.df['Date'].dt.to_period('M')).first()['Date']
+        injection_months = injection_dates.dt.to_period('M')
+        report['new_capital'] = report.index.to_period('M').isin(injection_months) * 1000
+
+        report['Monthly P/L'] = report['Portfolio Value'] - report['prev_month_value'] - report['new_capital']
+        
+        # Format for printing
+        report_to_print = report[['Month', 'Available Cash', 'Invested This Month', 'Monthly P/L']].copy()
+        for col in ['Available Cash', 'Invested This Month', 'Monthly P/L']:
+            report_to_print[col] = report_to_print[col].apply(lambda x: f"${x:,.2f}")
+        
+        print(report_to_print.to_string(index=False))
+        print("="*80)
+        
         return model_portfolio
         
     def calculate_max_drawdown(self, portfolio_values):
@@ -224,11 +299,13 @@ class StrategyComparer:
                 total_invested = len(investment_dates) * 1000
                 num_investments = len(investment_dates)
             else:
+                # For model strategy, total invested is the sum of monthly injections
+                investment_dates = self.df.groupby(self.df['Date'].dt.to_period('M')).first()['Date']
+                total_invested = len(investment_dates) * 1000
                 num_investments = (portfolio['buy_signal'] > 0).sum()
-                total_invested = portfolio['buy_signal'].sum()
 
             net_profit = final_value - total_invested
-            total_return_pct = (net_profit / total_invested) if total_invested > 0 else 0
+            total_return_pct = (net_profit / total_invested * 100) if total_invested > 0 else 0
             
 
             
@@ -300,19 +377,22 @@ class StrategyComparer:
         
         # Calculate total invested at each point
         dca_investment_dates = self.df.groupby(self.df['Date'].dt.to_period('M')).first()['Date']
-        model_investments = self.results['Model']['buy_signal'].cumsum()
         
         for i, date in enumerate(self.df['Date']):
             # DCA ROI calculation
             months_passed = len(dca_investment_dates[dca_investment_dates <= date])
             dca_total_invested = months_passed * 1000
+            if dca_total_invested == 0:
+                # Handle start of period before first investment
+                dca_total_invested = 1000 if months_passed > 0 else 0
+            
             dca_current_value = self.results['DCA'].loc[date, 'portfolio_value']
             dca_roi_pct = ((dca_current_value - dca_total_invested) / dca_total_invested * 100) if dca_total_invested > 0 else 0
             
             # Model ROI calculation
-            model_total_invested = model_investments.loc[date]
+            model_total_injected = dca_total_invested # Same capital basis
             model_current_value = self.results['Model'].loc[date, 'portfolio_value']
-            model_roi_pct = ((model_current_value - model_total_invested) / model_total_invested * 100) if model_total_invested > 0 else 0
+            model_roi_pct = ((model_current_value - model_total_injected) / model_total_injected * 100) if model_total_injected > 0 else 0
             
             dca_roi.append(dca_roi_pct)
             model_roi.append(model_roi_pct)
@@ -328,13 +408,13 @@ class StrategyComparer:
         ax1.grid(True, alpha=0.3)
         
         # Plot cumulative returns
-        dca_cumulative_return = [(roi/100 + 1) for roi in dca_roi]
-        model_cumulative_return = [(roi/100 + 1) for roi in model_roi]
+        dca_cumulative_return = [(roi/100) for roi in dca_roi]
+        model_cumulative_return = [(roi/100) for roi in model_roi]
         
         ax2.plot(dates, dca_cumulative_return, label='DCA Strategy', color='cyan', linewidth=2)
         ax2.plot(dates, model_cumulative_return, label='Meta-Model Strategy', color='magenta', linewidth=2)
-        ax2.axhline(y=1, color='red', linestyle='--', alpha=0.7, label='Initial Investment')
-        ax2.set_title('Cumulative Returns (1 = Initial Investment)', fontsize=16)
+        ax2.axhline(y=0, color='red', linestyle='--', alpha=0.7, label='Initial Investment')
+        ax2.set_title('Cumulative Returns (0 = Break-even)', fontsize=16)
         ax2.set_ylabel('Cumulative Return', fontsize=12)
         ax2.set_xlabel('Date', fontsize=12)
         ax2.legend(fontsize=10)
@@ -399,6 +479,12 @@ class StrategyComparer:
         dca_monthly = self.results['DCA']['portfolio_value'].resample('M').last().pct_change().dropna()
         model_monthly = self.results['Model']['portfolio_value'].resample('M').last().pct_change().dropna()
         
+        # Handle cases with insufficient data for stats
+        if len(dca_monthly) < 2 or len(model_monthly) < 2:
+            print("Insufficient monthly data to plot risk-return analysis.")
+            plt.close(fig)
+            return
+
         # Risk-return scatter
         dca_avg_return = dca_monthly.mean() * 12 * 100  # Annualized
         dca_volatility = dca_monthly.std() * np.sqrt(12) * 100  # Annualized
@@ -429,19 +515,20 @@ class StrategyComparer:
         ax2.grid(True, alpha=0.3)
         
         # Monthly returns comparison
-        months = range(len(dca_monthly))
-        ax3.bar([m-0.2 for m in months], dca_monthly * 100, width=0.4, alpha=0.7, color='cyan', label='DCA Strategy')
-        ax3.bar([m+0.2 for m in months], model_monthly * 100, width=0.4, alpha=0.7, color='magenta', label='Meta-Model Strategy')
-        ax3.set_xlabel('Month', fontsize=12)
-        ax3.set_ylabel('Monthly Return (%)', fontsize=12)
-        ax3.set_title('Monthly Returns Comparison', fontsize=14)
-        ax3.legend(fontsize=10)
-        ax3.grid(True, alpha=0.3)
+        if not dca_monthly.empty and not model_monthly.empty:
+            months = range(len(dca_monthly))
+            ax3.bar([m-0.2 for m in months], dca_monthly * 100, width=0.4, alpha=0.7, color='cyan', label='DCA Strategy')
+            ax3.bar([m+0.2 for m in months], model_monthly * 100, width=0.4, alpha=0.7, color='magenta', label='Meta-Model Strategy')
+            ax3.set_xlabel('Month', fontsize=12)
+            ax3.set_ylabel('Monthly Return (%)', fontsize=12)
+            ax3.set_title('Monthly Returns Comparison', fontsize=14)
+            ax3.legend(fontsize=10)
+            ax3.grid(True, alpha=0.3)
         
         # Sharpe ratio comparison (assuming risk-free rate of 2%)
         risk_free_rate = 0.02 / 12  # Monthly risk-free rate
-        dca_sharpe = (dca_monthly.mean() - risk_free_rate) / dca_monthly.std() * np.sqrt(12)
-        model_sharpe = (model_monthly.mean() - risk_free_rate) / model_monthly.std() * np.sqrt(12)
+        dca_sharpe = (dca_monthly.mean() - risk_free_rate) / dca_monthly.std() * np.sqrt(12) if dca_monthly.std() != 0 else 0
+        model_sharpe = (model_monthly.mean() - risk_free_rate) / model_monthly.std() * np.sqrt(12) if model_monthly.std() != 0 else 0
         
         strategies = ['DCA Strategy', 'Meta-Model Strategy']
         sharpe_ratios = [dca_sharpe, model_sharpe]
@@ -522,6 +609,10 @@ class StrategyComparer:
             predictions.append(prediction)
             dates.append(date)
         
+        # Calculate 20-day moving average
+        prediction_series = pd.Series(predictions, index=dates)
+        prediction_ma_20 = prediction_series.rolling(window=20, min_periods=1).mean()
+        
         # Create the main plot with dual y-axes
         ax1_twin = ax1.twinx()
         
@@ -530,27 +621,42 @@ class StrategyComparer:
         ax1.set_ylabel('S&P 500 Price ($)', fontsize=12, color='blue')
         ax1.tick_params(axis='y', labelcolor='blue')
         
-        # Plot model confidence on secondary y-axis
-        line2 = ax1_twin.plot(dates, predictions, color='red', linewidth=2, alpha=0.8, label='Model Confidence')
-        ax1_twin.set_ylabel('Model Prediction Confidence', fontsize=12, color='red')
+        # Plot 20-day moving average confidence on secondary y-axis
+        line2 = ax1_twin.plot(dates, prediction_ma_20.values, color='red', linewidth=2, alpha=0.8, label='20-Day MA Confidence')
+        ax1_twin.set_ylabel('Model Prediction Confidence (20-Day MA)', fontsize=12, color='red')
         ax1_twin.tick_params(axis='y', labelcolor='red')
         ax1_twin.set_ylim(0, 1)
         
-        # Add threshold line
-        threshold = 0.985  # Current threshold
-        ax1_twin.axhline(y=threshold, color='orange', linestyle='--', alpha=0.7, 
-                        label=f'Buy Threshold ({threshold})')
+        # Add threshold lines
+        buy_threshold = 0.85  # Buy threshold
+        sell_threshold = 0.52  # Sell threshold
+        ax1_twin.axhline(y=buy_threshold, color='orange', linestyle='--', alpha=0.7, 
+                        label=f'Buy Threshold ({buy_threshold})')
+        ax1_twin.axhline(y=sell_threshold, color='red', linestyle='--', alpha=0.7, 
+                        label=f'Sell Threshold ({sell_threshold})')
         
         # Add buy signals
         model_buy_signals = self.results['Model'][self.results['Model']['buy_signal'] > 0]
         if not model_buy_signals.empty:
             buy_dates = model_buy_signals.index
             buy_prices = self.df[self.df['Date'].isin(buy_dates)]['CP'].values
-            buy_confidences = [predictions[dates.index(date)] for date in buy_dates]
+            buy_confidences = [prediction_ma_20.loc[date] for date in buy_dates]
             
             ax1.scatter(buy_dates, buy_prices, color='green', s=100, marker='^', 
                        label='Buy Signal', zorder=5, edgecolors='black')
             ax1_twin.scatter(buy_dates, buy_confidences, color='green', s=100, marker='^', 
+                           zorder=5, edgecolors='black')
+        
+        # Add sell signals
+        model_sell_signals = self.results['Model'][self.results['Model']['sell_signal'] > 0]
+        if not model_sell_signals.empty:
+            sell_dates = model_sell_signals.index
+            sell_prices = self.df[self.df['Date'].isin(sell_dates)]['CP'].values
+            sell_confidences = [prediction_ma_20.loc[date] for date in sell_dates]
+            
+            ax1.scatter(sell_dates, sell_prices, color='red', s=100, marker='v', 
+                       label='Sell Signal', zorder=5, edgecolors='black')
+            ax1_twin.scatter(sell_dates, sell_confidences, color='red', s=100, marker='v', 
                            zorder=5, edgecolors='black')
         
         # Combine legends
@@ -559,34 +665,44 @@ class StrategyComparer:
         ax1.legend(lines, labels, loc='upper left', fontsize=10)
         ax1_twin.legend(loc='upper right', fontsize=10)
         
-        ax1.set_title('Model Confidence vs S&P 500 Price', fontsize=16)
+        ax1.set_title('Model Confidence (20-Day MA) vs S&P 500 Price', fontsize=16)
         ax1.set_xlabel('Date', fontsize=12)
         ax1.grid(True, alpha=0.3)
         
         # Second subplot: Confidence distribution and buy signal analysis
-        # Plot confidence distribution over time
-        ax2.plot(dates, predictions, color='purple', linewidth=1, alpha=0.6, label='Daily Confidence')
+        # Plot daily confidence distribution over time
+        ax2.plot(dates, predictions, color='lightblue', linewidth=1, alpha=0.4, label='Daily Confidence')
         
-        # Add moving average of confidence
-        confidence_series = pd.Series(predictions, index=dates)
-        confidence_ma = confidence_series.rolling(window=20).mean()
-        ax2.plot(dates, confidence_ma, color='purple', linewidth=2, label='20-Day Moving Average')
+        # Plot 20-day moving average of confidence
+        ax2.plot(dates, prediction_ma_20.values, color='purple', linewidth=2, label='20-Day Moving Average')
         
-        # Add threshold line
-        ax2.axhline(y=threshold, color='orange', linestyle='--', alpha=0.7, 
-                   label=f'Buy Threshold ({threshold})')
+        # Add threshold lines
+        ax2.axhline(y=buy_threshold, color='orange', linestyle='--', alpha=0.7, 
+                   label=f'Buy Threshold ({buy_threshold})')
+        ax2.axhline(y=sell_threshold, color='red', linestyle='--', alpha=0.7, 
+                   label=f'Sell Threshold ({sell_threshold})')
         
-        # Highlight periods above threshold
-        above_threshold = confidence_series > threshold
-        ax2.fill_between(dates, 0, 1, where=above_threshold, alpha=0.2, color='green', 
-                        label='Above Threshold')
+        # Highlight periods above buy threshold (using 20-day MA)
+        above_buy_threshold = prediction_ma_20 > buy_threshold
+        ax2.fill_between(dates, 0, 1, where=above_buy_threshold, alpha=0.2, color='green', 
+                        label='Above Buy Threshold')
+        
+        # Highlight periods below sell threshold
+        below_sell_threshold = prediction_ma_20 < sell_threshold
+        ax2.fill_between(dates, 0, 1, where=below_sell_threshold, alpha=0.2, color='red', 
+                        label='Below Sell Threshold')
         
         # Add buy signals
         if not model_buy_signals.empty:
             ax2.scatter(buy_dates, buy_confidences, color='green', s=100, marker='^', 
                        label='Buy Signal', zorder=5, edgecolors='black')
         
-        ax2.set_title('Model Confidence Analysis', fontsize=16)
+        # Add sell signals
+        if not model_sell_signals.empty:
+            ax2.scatter(sell_dates, sell_confidences, color='red', s=100, marker='v', 
+                       label='Sell Signal', zorder=5, edgecolors='black')
+        
+        ax2.set_title('Model Confidence Analysis (20-Day MA)', fontsize=16)
         ax2.set_ylabel('Confidence Level', fontsize=12)
         ax2.set_xlabel('Date', fontsize=12)
         ax2.set_ylim(0, 1)
@@ -597,7 +713,7 @@ class StrategyComparer:
         plt.show()
 
     def plot_buy_signals(self):
-        """Plot the S&P 500 price with buy signals for both strategies"""
+        """Plot the S&P 500 price with buy and sell signals for both strategies"""
         plt.style.use('seaborn-v0_8-darkgrid')
         fig, ax = plt.subplots(figsize=(15, 8))
         
@@ -605,14 +721,26 @@ class StrategyComparer:
         
         # Get buy signals for the model strategy
         model_buy_signals = self.results['Model'][self.results['Model']['buy_signal'] > 0]
-        # Get the S&P 500 prices for the buy signal dates
-        model_buy_dates = model_buy_signals.index
-        model_buy_prices = self.df[self.df['Date'].isin(model_buy_dates)]['CP'].values
-        
-        # Scale marker size by investment amount for better visualization
-        marker_sizes = model_buy_signals['buy_signal'] / 5 
-        ax.scatter(model_buy_dates, model_buy_prices, 
-                   label='Model Buy Signal', marker='^', color='green', s=marker_sizes, zorder=3, edgecolors='black', alpha=0.8)
+        if not model_buy_signals.empty:
+            # Get the S&P 500 prices for the buy signal dates
+            model_buy_dates = model_buy_signals.index
+            model_buy_prices = self.df[self.df['Date'].isin(model_buy_dates)]['CP'].values
+            
+            # Scale marker size by investment amount for better visualization
+            marker_sizes = model_buy_signals['buy_signal'] / 5 
+            ax.scatter(model_buy_dates, model_buy_prices, 
+                    label='Model Buy Signal', marker='^', color='green', s=marker_sizes, zorder=3, edgecolors='black', alpha=0.8)
+
+        # Get sell signals for the model strategy
+        model_sell_signals = self.results['Model'][self.results['Model']['sell_signal'] > 0]
+        if not model_sell_signals.empty:
+            model_sell_dates = model_sell_signals.index
+            model_sell_prices = self.df[self.df['Date'].isin(model_sell_dates)]['CP'].values
+            
+            # Scale marker size by sell amount for better visualization
+            sell_marker_sizes = model_sell_signals['sell_signal'] / 5
+            ax.scatter(model_sell_dates, model_sell_prices, 
+                       label='Model Sell Signal', marker='v', color='red', s=sell_marker_sizes, zorder=3, edgecolors='black', alpha=0.8)
 
         # Get buy signals for the DCA strategy
         dca_investment_dates = self.df.groupby(self.df['Date'].dt.to_period('M')).first()['Date']
@@ -620,7 +748,7 @@ class StrategyComparer:
         ax.scatter(dca_buy_signals['Date'], dca_buy_signals['CP'],
                    label='DCA Buy Signal', marker='o', color='cyan', s=100, zorder=2, edgecolors='black', alpha=0.7)
 
-        ax.set_title('Strategy Buy Signals: DCA vs. Meta-Model', fontsize=18)
+        ax.set_title('Strategy Buy/Sell Signals: DCA vs. Meta-Model', fontsize=18)
         ax.set_ylabel('S&P 500 Price ($)', fontsize=14)
         ax.set_xlabel('Date', fontsize=14)
         ax.legend(fontsize=12)
