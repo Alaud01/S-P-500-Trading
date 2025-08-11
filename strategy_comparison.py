@@ -28,7 +28,16 @@ class StrategyComparer:
     def load_trained_models(self):
         """Load all trained models"""
         print("Loading trained models...")
-        self.models['lstm'] = load_model('models/lstm_model.h5')
+        # Handle Keras compatibility issue with custom_objects
+        try:
+            self.models['lstm'] = load_model('models/lstm_model.h5')
+        except ValueError as e:
+            if "Orthogonal" in str(e):
+                print("Fixing Keras compatibility issue...")
+                from keras.initializers import Orthogonal
+                self.models['lstm'] = load_model('models/lstm_model.h5', custom_objects={'Orthogonal': Orthogonal})
+            else:
+                raise e
         self.scalers['lstm'] = joblib.load('models/lstm_scaler.pkl')
         self.models['xgboost'] = joblib.load('models/xgboost_model.pkl')
         self.scalers['xgboost'] = joblib.load('models/xgboost_scaler.pkl')
