@@ -16,7 +16,7 @@ plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
 
 class SP500DataAnalyzer:
-    def __init__(self, data_file='enhanced_sp500_dataset.csv'):
+    def __init__(self, data_file='data/enhanced_sp500_dataset.csv'):
         """Initialize the analyzer with S&P 500 data"""
         print("Loading S&P 500 enhanced dataset...")
         self.df = pd.read_csv(data_file)
@@ -190,7 +190,7 @@ class SP500DataAnalyzer:
     def create_correlation_analysis(self):
         """Analyze correlations between variables"""
         # Select numeric columns for correlation
-        corr_columns = ['CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'Sentiment_MA_5',
+        corr_columns = ['CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'Sentiment_MA_5',
                         'Returns', 'Volatility_20', 'RSI', 'MACD']
         
         corr_data = self.df[corr_columns].corr()
@@ -385,7 +385,7 @@ class SP500DataAnalyzer:
         
         # Feature list for prediction
         feature_columns = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'Sentiment_MA_5',
+            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'Sentiment_MA_5',
             'MA_5', 'MA_20', 'MA_50', 'RSI', 'MACD', 'MACD_Signal',
             'BB_Position', 'BB_Width', 'Volatility_20', 'Volume_Ratio',
             'Price_Change_5d', 'Price_Change_20d'
@@ -398,8 +398,8 @@ class SP500DataAnalyzer:
         print(f"Features available: {len(feature_columns)}")
         
         # Save processed data for modeling
-        self.df.to_csv('sp500_features_for_prediction.csv', index=False)
-        print(f"\nFeature-engineered dataset saved as 'sp500_features_for_prediction.csv'")
+        self.df.to_csv('data/sp500_features_for_prediction.csv', index=False)
+        print(f"\nFeature-engineered dataset saved as 'data/sp500_features_for_prediction.csv'")
         
         return feature_columns, feature_df
         
@@ -422,7 +422,7 @@ class SP500DataAnalyzer:
         print("ANALYSIS COMPLETE - READY FOR PREDICTIVE MODELING")
         print("="*80)
         print("Next steps for prediction:")
-        print("1. Use 'sp500_features_for_prediction.csv' for model training")
+        print("1. Use 'data/sp500_features_for_prediction.csv' for model training")
         print("2. Consider ensemble methods (Random Forest, XGBoost, Neural Networks)")
         print("3. Implement proper train/validation/test splits with time series")
         print("4. Evaluate models using appropriate metrics (MAE, RMSE, directional accuracy)")
@@ -431,7 +431,7 @@ class SP500DataAnalyzer:
 def main():
     """Main function to run the complete analysis"""
     # Initialize analyzer
-    analyzer = SP500DataAnalyzer('enhanced_sp500_dataset.csv')
+    analyzer = SP500DataAnalyzer('data/enhanced_sp500_dataset.csv')
     
     # Run comprehensive analysis
     analyzer.create_comprehensive_dashboard()

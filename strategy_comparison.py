@@ -12,7 +12,7 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 
 class StrategyComparer:
-    def __init__(self, data_file='sp500_features_for_prediction.csv', start_date='2022-01-01'):
+    def __init__(self, data_file='data/sp500_features_for_prediction.csv', start_date='2022-01-01'):
         """Initialize the strategy comparison"""
         self.data_file = data_file
         self.start_date = pd.to_datetime(start_date)
@@ -20,6 +20,9 @@ class StrategyComparer:
         self.scalers = {}
         self.df = None
         self.results = {}
+        # Track configured monthly investments for accurate reporting
+        self.dca_monthly_investment = 1000
+        self.model_monthly_investment = 1000
         
         # Load models and data
         self.load_trained_models()
@@ -68,7 +71,7 @@ class StrategyComparer:
         
         # Prepare features
         technical_features = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'MA_5', 'MA_20', 'MA_50', 
+            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'MA_5', 'MA_20', 'MA_50', 
             'RSI', 'MACD', 'MACD_Signal', 'BB_Position', 'BB_Width', 'Volatility_20', 
             'Volume_Ratio', 'Price_Change_5d', 'Price_Change_20d', 'Sentiment_MA_5'
         ]
@@ -76,7 +79,7 @@ class StrategyComparer:
         all_features = technical_features + lag_features
         
         lstm_features = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'RSI', 'MACD', 'Volatility_20', 
+            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'RSI', 'MACD', 'Volatility_20', 
             'BB_Position', 'Sentiment_MA_5'
         ]
         
@@ -99,7 +102,7 @@ class StrategyComparer:
         
         # Meta-model prediction
         base_model_preds = np.array([[lstm_pred_proba, xgb_pred_proba, linear_pred_proba]])
-        additional_features_list = ['CP', 'Volatility_20', 'RSI', 'Interest_Rate', 'Inflation_Rate', 'Sentiment_MA_5']
+        additional_features_list = ['CP', 'Volatility_20', 'RSI', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'Sentiment_MA_5']
         additional_values = data_for_date[additional_features_list].values
         
         meta_features = np.column_stack([base_model_preds, additional_values])
@@ -109,6 +112,8 @@ class StrategyComparer:
 
     def run_dca_strategy(self, monthly_investment=1000):
         """Run the Dollar Cost Averaging strategy"""
+        # Persist investment setting for reporting/metrics
+        self.dca_monthly_investment = monthly_investment
         dca_portfolio = pd.DataFrame(index=self.df['Date'])
         dca_portfolio['cash'] = 0
         dca_portfolio['shares'] = 0
@@ -137,6 +142,8 @@ class StrategyComparer:
 
     def run_model_strategy(self, monthly_investment=1000):
         """Run the strategy guided by the meta-model with daily, confidence-scaled decisions and fund accumulation."""
+        # Persist investment setting for reporting/metrics
+        self.model_monthly_investment = monthly_investment
         model_portfolio = pd.DataFrame(index=self.df['Date'])
         model_portfolio['cash'] = 0
         model_portfolio['shares'] = 0
@@ -149,9 +156,9 @@ class StrategyComparer:
         trades_this_month = 0
 
         # --- Strategy Parameters ---
-        trade_decision_threshold = 0.82   # Threshold for 20-day moving average
-        sell_threshold = 0.52             # Start selling when prediction < 0.52
-        max_sell_threshold = 0.3          # Sell all when prediction <= 0.3
+        trade_decision_threshold = 0.65   # Threshold for 20-day moving average (buy when > 0.65)
+        sell_threshold = 0.4              # Start selling when prediction < 0.4
+        max_sell_threshold = 0.4          # Sell all when prediction <= 0.4 (same as sell_threshold for immediate selling)
         max_trades_per_month = 15         # Limit number of trades per month
         min_investment_ratio = 0.2       # At least 20% of available funds
         # --- End of Parameters ---
@@ -263,7 +270,7 @@ class StrategyComparer:
         # Find all injection dates to determine which months got new capital
         injection_dates = self.df.groupby(self.df['Date'].dt.to_period('M')).first()['Date']
         injection_months = injection_dates.dt.to_period('M')
-        report['new_capital'] = report.index.to_period('M').isin(injection_months) * 1000
+        report['new_capital'] = report.index.to_period('M').isin(injection_months) * float(self.model_monthly_investment)
 
         report['Monthly P/L'] = report['Portfolio Value'] - report['prev_month_value'] - report['new_capital']
         
@@ -303,15 +310,24 @@ class StrategyComparer:
             portfolio = self.results[strategy_name]
             final_value = portfolio['portfolio_value'].iloc[-1]
             
+            # Common monthly injection dates based on available data
+            investment_dates = self.df.groupby(self.df['Date'].dt.to_period('M')).first()['Date']
+            months_contributed = len(investment_dates)
+
             if strategy_name == 'DCA':
-                investment_dates = self.df.groupby(self.df['Date'].dt.to_period('M')).first()['Date']
-                total_invested = len(investment_dates) * 1000
-                num_investments = len(investment_dates)
+                monthly_investment_used = float(self.dca_monthly_investment)
+                total_invested = months_contributed * monthly_investment_used
+                # Number of capital injections (months contributed)
+                num_injections = months_contributed
+                # DCA doesn't execute discretionary trades; months == injections
+                trades_executed = num_injections
             else:
-                # For model strategy, total invested is the sum of monthly injections
-                investment_dates = self.df.groupby(self.df['Date'].dt.to_period('M')).first()['Date']
-                total_invested = len(investment_dates) * 1000
-                num_investments = (portfolio['buy_signal'] > 0).sum()
+                monthly_investment_used = float(self.model_monthly_investment)
+                total_invested = months_contributed * monthly_investment_used
+                # Number of capital injections is still months contributed
+                num_injections = months_contributed
+                # Trades executed equals number of buy events
+                trades_executed = int((portfolio['buy_signal'] > 0).sum())
 
             net_profit = final_value - total_invested
             total_return_pct = (net_profit / total_invested * 100) if total_invested > 0 else 0
@@ -325,7 +341,8 @@ class StrategyComparer:
                 "Total Amount Invested": f"${total_invested:,.2f}",
                 "Net Profit": f"${net_profit:,.2f}",
                 "Total Return on Investment": f"{total_return_pct:.2f}%",
-                "Number of Investments": num_investments,
+                "Months Contributed": num_injections,
+                "Trades Executed": trades_executed,
                 "Maximum Drawdown": f"{max_drawdown:.2%}"
             }
         
@@ -351,7 +368,7 @@ class StrategyComparer:
         else:
             print(f"• RISK INCREASE: The model strategy was riskier, with a max drawdown of {model_drawdown:.2f}% vs DCA's {dca_drawdown:.2f}%.")
             
-        print(f"• SELECTIVITY: The model chose to invest in only {metrics['Model']['Number of Investments']} out of a possible {metrics['DCA']['Number of Investments']} months.")
+        print(f"• SELECTIVITY: The model executed {metrics['Model']['Trades Executed']} buy trades across {metrics['Model']['Months Contributed']} contributed months (DCA months: {metrics['DCA']['Months Contributed']}).")
 
 
     def plot_performance_comparison(self):
@@ -390,16 +407,18 @@ class StrategyComparer:
         for i, date in enumerate(self.df['Date']):
             # DCA ROI calculation
             months_passed = len(dca_investment_dates[dca_investment_dates <= date])
-            dca_total_invested = months_passed * 1000
+            dca_total_invested = months_passed * float(self.dca_monthly_investment)
+            # Handle start of period before first investment
             if dca_total_invested == 0:
-                # Handle start of period before first investment
-                dca_total_invested = 1000 if months_passed > 0 else 0
+                dca_total_invested = float(self.dca_monthly_investment) if months_passed > 0 else 0
             
             dca_current_value = self.results['DCA'].loc[date, 'portfolio_value']
             dca_roi_pct = ((dca_current_value - dca_total_invested) / dca_total_invested * 100) if dca_total_invested > 0 else 0
             
-            # Model ROI calculation
-            model_total_injected = dca_total_invested # Same capital basis
+            # Model ROI calculation uses its own monthly investment setting
+            model_total_injected = months_passed * float(self.model_monthly_investment)
+            if model_total_injected == 0:
+                model_total_injected = float(self.model_monthly_investment) if months_passed > 0 else 0
             model_current_value = self.results['Model'].loc[date, 'portfolio_value']
             model_roi_pct = ((model_current_value - model_total_injected) / model_total_injected * 100) if model_total_injected > 0 else 0
             
@@ -637,8 +656,8 @@ class StrategyComparer:
         ax1_twin.set_ylim(0, 1)
         
         # Add threshold lines
-        buy_threshold = 0.85  # Buy threshold
-        sell_threshold = 0.52  # Sell threshold
+        buy_threshold = 0.65  # Buy threshold
+        sell_threshold = 0.4  # Sell threshold
         ax1_twin.axhline(y=buy_threshold, color='orange', linestyle='--', alpha=0.7, 
                         label=f'Buy Threshold ({buy_threshold})')
         ax1_twin.axhline(y=sell_threshold, color='red', linestyle='--', alpha=0.7, 

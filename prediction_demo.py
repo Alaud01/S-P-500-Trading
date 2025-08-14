@@ -44,7 +44,7 @@ class SP500PredictionDemo:
         
         print("All models loaded successfully!")
         
-    def prepare_latest_data(self, data_file='sp500_features_for_prediction.csv'):
+    def prepare_latest_data(self, data_file='data/sp500_features_for_prediction.csv'):
         """Prepare the latest data for prediction"""
         print("Preparing latest data for prediction...")
         
@@ -58,7 +58,7 @@ class SP500PredictionDemo:
         
         # Features for different models
         technical_features = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate',
+            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate',
             'MA_5', 'MA_20', 'MA_50', 'RSI', 'MACD', 'MACD_Signal',
             'BB_Position', 'BB_Width', 'Volatility_20', 'Volume_Ratio',
             'Price_Change_5d', 'Price_Change_20d', 'Sentiment_MA_5'
@@ -70,7 +70,7 @@ class SP500PredictionDemo:
         all_features = technical_features + lag_features
         
         lstm_features = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate',
+            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate',
             'RSI', 'MACD', 'Volatility_20', 'BB_Position', 'Sentiment_MA_5'
         ]
         
@@ -116,7 +116,7 @@ class SP500PredictionDemo:
             predictions['Linear']
         ]])
         
-        additional_features_list = ['CP', 'Volatility_20', 'RSI', 'Interest_Rate', 'Inflation_Rate', 'Sentiment_MA_5']
+        additional_features_list = ['CP', 'Volatility_20', 'RSI', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'Sentiment_MA_5']
         additional_values = latest_data[additional_features_list].values
         
         meta_features = np.column_stack([base_model_preds, additional_values])
