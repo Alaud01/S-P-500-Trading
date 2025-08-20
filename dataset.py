@@ -1,77 +1,93 @@
 import pandas as pd
-import yfinance as yf
-from datetime import datetime
 import numpy as np
+from datetime import datetime
 
-# --- Data Loading and Processing ---
-# Read the main S&P 500 headlines dataset
-print("Loading S&P 500 headlines data...")
-df = pd.read_csv('data/sp500 headlines 2008 to 2024.csv')
-print(f"Original dataset shape: {df.shape}")
-print(df.head())
-
-# Convert Date column to datetime
-df['Date'] = pd.to_datetime(df['Date'])
-
-# Filter data to start from 2008-01-02 onwards
-df = df[df['Date'] >= '2008-01-02'].reset_index(drop=True)
-print(f"Filtered dataset shape (from 2008-01-02): {df.shape}")
-
-# For now, we'll skip sentiment analysis due to library compatibility issues
-# and focus on incorporating the new economic indicators
-print("Skipping sentiment analysis for now - focusing on economic indicators...")
-
-# Aggregate headlines per day (just count them for now)
-print("Aggregating daily headline counts...")
-daily_headlines = df.groupby('Date').size().reset_index(name='Headline_Count')
-
-# Drop the original headlines to keep one row per day, but preserve CP column
-df_daily = df.drop(['Title'], axis=1).drop_duplicates(subset=['Date']).reset_index(drop=True)
-
-# Merge the headline count back into the daily data
-df = pd.merge(df_daily, daily_headlines, on='Date', how='left')
-
-# Get unique dates for volume data
-unique_dates = df['Date'].unique()
-print(f"\nDate range: {df['Date'].min()} to {df['Date'].max()}")
-print(f"Number of unique dates: {len(unique_dates)}")
-
-# Download S&P 500 volume data using yfinance
-print("\nDownloading S&P 500 volume data from yfinance...")
-ticker = "^GSPC"  # S&P 500 ticker symbol
-start_date = df['Date'].min()
-end_date = df['Date'].max()
-
-# Download data with a different approach
+# Optional sentiment imports (robust fallback if unavailable)
 try:
-    sp500_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-    sp500_data.reset_index(inplace=True)
-    
-    # Handle MultiIndex columns if present
-    if isinstance(sp500_data.columns, pd.MultiIndex):
-        # Flatten the MultiIndex columns
-        sp500_data.columns = ['_'.join(col).strip() for col in sp500_data.columns.values]
-        # Fix the Date column name
-        sp500_data.rename(columns={'Date_': 'Date'}, inplace=True)
-        volume_col = [col for col in sp500_data.columns if 'Volume' in col][0]
-        sp500_data.rename(columns={volume_col: 'Volume'}, inplace=True)
-    
-    print(f"Available columns in sp500_data: {sp500_data.columns.tolist()}")
-    
-    # Merge volume data with the main dataframe
-    print("Merging volume data...")
-    df = df.merge(sp500_data[['Date', 'Volume']], on='Date', how='left')
-    
-    # Check if volume data was successfully merged
-    if df['Volume'].isna().all():
-        print("Volume data is all NaN, using fallback...")
-        raise Exception("Volume data not available")
-    
-except Exception as e:
-    print(f"Failed to download volume data: {e}")
-    print("Creating placeholder volume data...")
-    # Create placeholder volume data based on headline count
-    df['Volume'] = df['Headline_Count'] * 1000000  # Simple placeholder
+    from transformers import pipeline
+    _has_transformers = True
+except Exception:
+    _has_transformers = False
+
+print("Loading yfinance S&P 500 dataset (cleaned)...")
+yf_path = 'data/yfinance_sp500_cleaned.csv'
+yf_df = pd.read_csv(yf_path)
+yf_df['Date'] = pd.to_datetime(yf_df['Date'])
+
+# Standardize columns and types
+rename_map = {
+    'Adj_Close': 'Adj_Close',
+    'Adj Close': 'Adj_Close',
+    'Close': 'Close',
+    'Open': 'Open',
+    'High': 'High',
+    'Low': 'Low',
+    'Volume': 'Volume'
+}
+yf_df = yf_df.rename(columns=rename_map)
+
+# Use Close as CP for consistency with downstream code
+yf_df['CP'] = pd.to_numeric(yf_df.get('Close', yf_df.get('Adj_Close')), errors='coerce')
+yf_df['Volume'] = pd.to_numeric(yf_df['Volume'], errors='coerce')
+
+# Keep only necessary columns but retain OHLC for potential future use
+base_cols = ['Date', 'CP', 'Open', 'High', 'Low', 'Close', 'Adj_Close', 'Volume']
+available_cols = [c for c in base_cols if c in yf_df.columns]
+df_base = yf_df[available_cols].copy()
+
+print("Loading S&P 500 headlines dataset for sentiment and counts...")
+news_df = pd.read_csv('data/sp500 headlines 2008 to 2024.csv')
+news_df['Date'] = pd.to_datetime(news_df['Date'])
+news_df = news_df[news_df['Date'] >= '2008-01-02'].reset_index(drop=True)
+
+print("Aggregating daily headline counts and computing daily sentiment...")
+
+# Headline counts
+headline_counts = news_df.groupby('Date').size().reset_index(name='Headline_Count')
+
+# Sentiment computation
+def _compute_daily_sentiment(df_group: pd.DataFrame) -> float:
+    titles = df_group['Title'].dropna().astype(str).tolist() if 'Title' in df_group.columns else []
+    if not titles:
+        return np.nan
+    # Try transformers pipeline first
+    if _has_transformers:
+        try:
+            clf = pipeline('sentiment-analysis', model='distilbert-base-uncased-finetuned-sst-2-english')
+            preds = clf(titles, truncation=True)
+            # Map to [-1, 1] via score, POS -> +score, NEG -> -score
+            scores = [p['score'] if p['label'].upper().startswith('POS') else -p['score'] for p in preds]
+            return float(np.mean(scores))
+        except Exception:
+            pass
+    # Fallback lexicon-based sentiment
+    positive_words = set([
+        'gain','gains','up','rise','rises','surge','surges','bull','bullish','beat','beats','strong','positive','jump','jumps','rally','rallies','record','optimism','better','improve','improves','improved'
+    ])
+    negative_words = set([
+        'loss','losses','down','fall','falls','drop','drops','bear','bearish','miss','misses','weak','negative','plunge','plunges','selloff','fear','worse','decline','declines','declined','crash','crashes'
+    ])
+    scores = []
+    for t in titles:
+        tokens = [tok.strip(".,!?;:'\"()[]{} ").lower() for tok in t.split()]
+        pos = sum(tok in positive_words for tok in tokens)
+        neg = sum(tok in negative_words for tok in tokens)
+        score = 0.0
+        if pos + neg > 0:
+            score = (pos - neg) / (pos + neg)
+        scores.append(score)
+    return float(np.mean(scores)) if scores else np.nan
+
+daily_sentiment = news_df.groupby('Date').apply(_compute_daily_sentiment).reset_index(name='Sentiment')
+
+# Merge counts and sentiment onto the yfinance base (left join on trading days)
+df = df_base.merge(headline_counts, on='Date', how='left')
+df = df.merge(daily_sentiment, on='Date', how='left')
+
+# Fill missing headline metrics sensibly
+df['Headline_Count'] = df['Headline_Count'].fillna(0).astype(int)
+# Keep Sentiment as NaN where no headlines; replace NaN with 0 to preserve prior behavior if desired
+df['Sentiment'] = df['Sentiment'].fillna(0.0)
 
 # Load interest rate data
 print("Loading interest rate data...")
@@ -140,13 +156,11 @@ df = df.merge(unemployment_df[['Year_Month', 'Unemployment_Rate']], on='Year_Mon
 # Remove the temporary Year_Month column
 df.drop('Year_Month', axis=1, inplace=True)
 
-# Add a placeholder sentiment column (will be filled later if needed)
-df['Sentiment'] = 0.0
-
 # Display results
-print(f"\nFinal dataset shape: {df.shape}")
+print(f"\nFinal enhanced dataset shape: {df.shape}")
 print("\nSample of enhanced dataset with all features:")
-print(df[['Date', 'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'Headline_Count', 'Sentiment']].head(10))
+sample_cols = [c for c in ['Date','CP','Volume','Open','High','Low','Close','Interest_Rate','Inflation_Rate','GDP','Gold_Price','Unemployment_Rate','Headline_Count','Sentiment'] if c in df.columns]
+print(df[sample_cols].head(10))
 
 # Display data info
 print(f"\nData summary:")
@@ -180,3 +194,13 @@ print(f"\nUnemployment Rate statistics:")
 print(df['Unemployment_Rate'].describe())
 print(f"\nHeadline Count statistics:")
 print(df['Headline_Count'].describe())
+
+# Optionally regenerate features_for_prediction via the analyzer
+try:
+    from visualization import SP500DataAnalyzer
+    print("\nRegenerating feature-engineered dataset for modeling...")
+    analyzer = SP500DataAnalyzer(output_filename)
+    analyzer.prepare_prediction_features()
+    print("Feature-engineered dataset saved as 'data/sp500_features_for_prediction.csv'")
+except Exception as e:
+    print(f"Skipping feature regeneration due to error: {e}")

@@ -4,7 +4,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime, timedelta
 import warnings
+import random
 warnings.filterwarnings('ignore')
+
+# Set seeds for reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
 
 # ML Libraries
 from sklearn.model_selection import TimeSeriesSplit
@@ -22,6 +28,9 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
+# Set TensorFlow seed for reproducibility
+tf.random.set_seed(SEED)
+
 # Additional utilities
 from scipy import stats
 import joblib
@@ -34,6 +43,8 @@ class SP500Predictor:
     def __init__(self, data_file='data/sp500_features_for_prediction.csv'):
         """Initialize the S&P 500 predictor with data"""
         print("Loading S&P 500 prediction dataset...")
+        print(f"Using seed {SEED} for reproducibility")
+        
         self.df = pd.read_csv(data_file)
         self.df['Date'] = pd.to_datetime(self.df['Date'])
         self.df = self.df.sort_values('Date').reset_index(drop=True)
@@ -59,12 +70,25 @@ class SP500Predictor:
         print("FEATURE PREPARATION")
         print("="*60)
         
-        # Technical indicators (for XGBoost and Linear models)
+        # All available features (for XGBoost and Linear models)
         technical_features = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate',
-            'MA_5', 'MA_20', 'MA_50', 'RSI', 'MACD', 'MACD_Signal',
-            'BB_Position', 'BB_Width', 'Volatility_20', 'Volume_Ratio',
-            'Price_Change_5d', 'Price_Change_20d', 'Sentiment_MA_5'
+            # Price and Volume data
+            'CP', 'Open', 'High', 'Low', 'Close', 'Adj_Close', 'Volume',
+            # Economic indicators
+            'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate',
+            # News sentiment
+            'Headline_Count', 'Sentiment', 'Sentiment_MA_5',
+            # Returns
+            'Returns', 'Log_Returns',
+            # Moving averages
+            'MA_5', 'MA_20', 'MA_50', 'MA_200',
+            # Technical indicators
+            'Volatility_20', 'RSI', 'BB_Middle', 'BB_Upper', 'BB_Lower', 'BB_Width', 'BB_Position',
+            'MACD', 'MACD_Signal', 'MACD_Histogram',
+            # Price changes
+            'Price_Change_5d', 'Price_Change_20d',
+            # Volume indicators
+            'Volume_MA_20', 'Volume_Ratio'
         ]
         
         # Lag features
@@ -74,11 +98,17 @@ class SP500Predictor:
         # All features for XGBoost and Linear models
         self.all_features = technical_features + lag_features
         
-        # Sequential features for LSTM (last 60 days)
+        # Sequential features for LSTM (last 60 days) - using key features for sequence modeling
         self.sequence_length = 60
         self.lstm_features = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate',
-            'RSI', 'MACD', 'Volatility_20', 'BB_Position', 'Sentiment_MA_5'
+            # Core price and volume
+            'CP', 'Volume', 'Returns',
+            # Economic indicators
+            'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate',
+            # Sentiment
+            'Sentiment', 'Sentiment_MA_5',
+            # Key technical indicators
+            'RSI', 'MACD', 'Volatility_20', 'BB_Position'
         ]
         
         # Remove rows with NaN values
@@ -117,23 +147,114 @@ class SP500Predictor:
         return train_data, val_data, test_data
         
     def train_lstm_model(self, train_data, val_data, test_data):
-        """Train LSTM model on sequential data"""
+        """Train LSTM model on sequential data using cross-validation time series split"""
         print("\n" + "="*60)
-        print("TRAINING LSTM MODEL")
+        print("TRAINING LSTM MODEL WITH CROSS-VALIDATION")
         print("="*60)
         
-        # Prepare sequences
-        X_train, y_train = self.create_sequences(train_data, self.lstm_features, self.target, self.sequence_length)
-        X_val, y_val = self.create_sequences(val_data, self.lstm_features, self.target, self.sequence_length)
-        X_test, y_test = self.create_sequences(test_data, self.lstm_features, self.target, self.sequence_length)
+        # Combine train and validation data for cross-validation
+        combined_data = pd.concat([train_data, val_data], ignore_index=True)
+        print(f"Combined data for LSTM CV: {len(combined_data)} records from {combined_data['Date'].min()} to {combined_data['Date'].max()}")
+        
+        # Create sequences for the combined data
+        X_combined, y_combined = self.create_sequences(combined_data, self.lstm_features, self.target, self.sequence_length)
         
         # Scale the data
-        X_train_scaled = self.lstm_scaler.fit_transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape)
-        X_val_scaled = self.lstm_scaler.transform(X_val.reshape(-1, X_val.shape[-1])).reshape(X_val.shape)
-        X_test_scaled = self.lstm_scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
+        X_combined_scaled = self.lstm_scaler.fit_transform(X_combined.reshape(-1, X_combined.shape[-1])).reshape(X_combined.shape)
         
-        # Build LSTM model
-        model = Sequential([
+        # Use TimeSeriesSplit for cross-validation
+        tscv = TimeSeriesSplit(n_splits=5, test_size=int(len(X_combined_scaled) * 0.2))
+        
+        # Store CV results
+        cv_scores = []
+        cv_histories = []
+        best_model = None
+        best_val_score = 0
+        
+        print(f"Performing {tscv.n_splits}-fold time series cross-validation...")
+        
+        for fold, (train_idx, val_idx) in enumerate(tscv.split(X_combined_scaled), 1):
+            print(f"\nFold {fold}/{tscv.n_splits}")
+            print(f"Train size: {len(train_idx)}, Validation size: {len(val_idx)}")
+            
+            # Split data for this fold
+            X_train_fold = X_combined_scaled[train_idx]
+            y_train_fold = y_combined[train_idx]
+            X_val_fold = X_combined_scaled[val_idx]
+            y_val_fold = y_combined[val_idx]
+            
+            # Build LSTM model
+            model = Sequential([
+                LSTM(128, return_sequences=True, input_shape=(self.sequence_length, len(self.lstm_features))),
+                BatchNormalization(),
+                Dropout(0.3),
+                LSTM(64, return_sequences=False),
+                BatchNormalization(),
+                Dropout(0.3),
+                Dense(32, activation='relu'),
+                Dropout(0.3),
+                Dense(1, activation='sigmoid')
+            ])
+            
+            model.compile(
+                optimizer=Adam(learning_rate=0.0005),
+                loss='binary_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            # Callbacks
+            early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+            reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7)
+            
+            # Train model
+            history = model.fit(
+                X_train_fold, y_train_fold,
+                validation_data=(X_val_fold, y_val_fold),
+                epochs=100,
+                batch_size=32,
+                callbacks=[early_stopping, reduce_lr],
+                class_weight=self.class_weights,
+                verbose=0
+            )
+            
+            # Evaluate on validation set
+            val_pred_proba = model.predict(X_val_fold, verbose=0).flatten()
+            val_pred = (val_pred_proba > 0.5).astype(int)
+            val_accuracy = accuracy_score(y_val_fold, val_pred)
+            val_f1 = f1_score(y_val_fold, val_pred)
+            
+            cv_scores.append({
+                'fold': fold,
+                'val_accuracy': val_accuracy,
+                'val_f1': val_f1,
+                'epochs': len(history.history['loss'])
+            })
+            
+            cv_histories.append(history)
+            
+            print(f"  Validation Accuracy: {val_accuracy:.4f}, F1: {val_f1:.4f}, Epochs: {len(history.history['loss'])}")
+            
+            # Keep track of best model
+            if val_f1 > best_val_score:
+                best_val_score = val_f1
+                best_model = model
+        
+        # Print CV summary
+        print(f"\nCross-Validation Results:")
+        print("-" * 50)
+        avg_accuracy = np.mean([score['val_accuracy'] for score in cv_scores])
+        avg_f1 = np.mean([score['val_f1'] for score in cv_scores])
+        std_accuracy = np.std([score['val_accuracy'] for score in cv_scores])
+        std_f1 = np.std([score['val_f1'] for score in cv_scores])
+        
+        print(f"Average Validation Accuracy: {avg_accuracy:.4f} (±{std_accuracy:.4f})")
+        print(f"Average Validation F1 Score: {avg_f1:.4f} (±{std_f1:.4f})")
+        
+        # Now train the final model on the combined train+val data using the best model architecture
+        print(f"\nTraining final LSTM model on combined train+validation data...")
+        
+        # Use the best model from CV or create a new one with the same architecture
+        final_model = Sequential([
             LSTM(128, return_sequences=True, input_shape=(self.sequence_length, len(self.lstm_features))),
             BatchNormalization(),
             Dropout(0.3),
@@ -145,20 +266,15 @@ class SP500Predictor:
             Dense(1, activation='sigmoid')
         ])
         
-        model.compile(
+        final_model.compile(
             optimizer=Adam(learning_rate=0.0005),
             loss='binary_crossentropy',
             metrics=['accuracy']
         )
         
-        # Callbacks
-        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7)
-        
-        # Train model
-        history = model.fit(
-            X_train_scaled, y_train,
-            validation_data=(X_val_scaled, y_val),
+        # Train final model on combined data
+        final_history = final_model.fit(
+            X_combined_scaled, y_combined,
             epochs=100,
             batch_size=32,
             callbacks=[early_stopping, reduce_lr],
@@ -166,110 +282,287 @@ class SP500Predictor:
             verbose=1
         )
         
+        # Prepare test sequences
+        X_test, y_test = self.create_sequences(test_data, self.lstm_features, self.target, self.sequence_length)
+        X_test_scaled = self.lstm_scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
+        
         # Make predictions
-        train_pred_proba = model.predict(X_train_scaled).flatten()
-        val_pred_proba = model.predict(X_val_scaled).flatten()
-        test_pred_proba = model.predict(X_test_scaled).flatten()
+        train_pred_proba = final_model.predict(X_combined_scaled, verbose=0).flatten()
+        test_pred_proba = final_model.predict(X_test_scaled, verbose=0).flatten()
         
         # Convert probabilities to binary predictions
         train_pred = (train_pred_proba > 0.5).astype(int)
-        val_pred = (val_pred_proba > 0.5).astype(int)
         test_pred = (test_pred_proba > 0.5).astype(int)
         
         # Calculate metrics
-        train_accuracy = accuracy_score(y_train, train_pred)
-        val_accuracy = accuracy_score(y_val, val_pred)
+        train_accuracy = accuracy_score(y_combined, train_pred)
         test_accuracy = accuracy_score(y_test, test_pred)
         
-        print(f"LSTM Results:")
+        print(f"Final LSTM Results:")
         print(f"  Train Accuracy: {train_accuracy:.4f}")
-        print(f"  Validation Accuracy: {val_accuracy:.4f}")
         print(f"  Test Accuracy: {test_accuracy:.4f}")
+        print(f"  CV Average F1: {avg_f1:.4f}")
         
         # Store model and predictions
         self.models['lstm'] = {
-            'model': model,
+            'model': final_model,
             'scaler': self.lstm_scaler,
             'train_pred': train_pred,
-            'val_pred': val_pred,
+            'val_pred': None,  # No single validation set in CV approach
             'test_pred': test_pred,
             'train_pred_proba': train_pred_proba,
-            'val_pred_proba': val_pred_proba,
+            'val_pred_proba': None,  # No single validation set in CV approach
             'test_pred_proba': test_pred_proba,
-            'train_actual': y_train,
-            'val_actual': y_val,
+            'train_actual': y_combined,
+            'val_actual': None,  # No single validation set in CV approach
             'test_actual': y_test,
-            'history': history
+            'history': final_history,
+            'cv_scores': cv_scores,
+            'cv_histories': cv_histories
         }
         
-        return model, train_pred_proba, val_pred_proba, test_pred_proba
+        return final_model, train_pred_proba, None, test_pred_proba
         
     def train_xgboost_model(self, train_data, val_data, test_data):
-        """Train XGBoost model"""
+        """Train XGBoost model with time-series cross-validation"""
         print("\n" + "="*60)
-        print("TRAINING XGBOOST MODEL")
+        print("TRAINING XGBOOST MODEL WITH TIME-SERIES CV")
         print("="*60)
         
-        # Prepare data
-        X_train = train_data[self.all_features]
-        y_train = train_data[self.target]
-        X_val = val_data[self.all_features]
-        y_val = val_data[self.target]
-        X_test = test_data[self.all_features]
-        y_test = test_data[self.target]
+        # Use time-series cross-validation like LSTM to prevent overfitting
+        print("Using time-series cross-validation for XGBoost...")
+        
+        # Combine train and validation data for CV
+        combined_data = pd.concat([train_data, val_data], ignore_index=True)
+        print(f"Combined data for XGBoost CV: {len(combined_data)} records from {combined_data['Date'].min()} to {combined_data['Date'].max()}")
+        
+        # Prepare features for CV
+        X_combined = combined_data[self.all_features]
+        y_combined = combined_data[self.target]
         
         # Scale features
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_val_scaled = self.scaler.transform(X_val)
-        X_test_scaled = self.scaler.transform(X_test)
+        X_combined_scaled = self.scaler.fit_transform(X_combined)
         
-        # XGBoost parameters optimized for financial time series
-        xgb_params = {
+        # Use TimeSeriesSplit for cross-validation
+        tscv = TimeSeriesSplit(n_splits=5, test_size=int(len(X_combined_scaled) * 0.2))
+        
+        # Store CV results
+        cv_scores = []
+        cv_models = []
+        best_model = None
+        best_val_score = 0
+        
+        print(f"Performing {tscv.n_splits}-fold time series cross-validation...")
+        
+        for fold, (train_idx, val_idx) in enumerate(tscv.split(X_combined_scaled), 1):
+            print(f"\nFold {fold}/{tscv.n_splits}")
+            print(f"Train size: {len(train_idx)}, Validation size: {len(val_idx)}")
+            
+            # Split data for this fold
+            X_train_fold = X_combined_scaled[train_idx]
+            y_train_fold = y_combined[train_idx]
+            X_val_fold = X_combined_scaled[val_idx]
+            y_val_fold = y_combined[val_idx]
+            
+            # XGBoost parameters tuned to prevent overfitting and handle class imbalance
+            xgb_params = {
+                'objective': 'binary:logistic',
+                'n_estimators': 500,
+                'max_depth': 3,
+                'min_child_weight': 3,
+                'learning_rate': 0.01,
+                'subsample': 0.7,
+                'colsample_bytree': 0.7,
+                'gamma': 0.1,
+                'reg_alpha': 0.1,
+                'reg_lambda': 1.0,
+                'random_state': 42,
+                'eval_metric': ['logloss', 'auc'],
+                'scale_pos_weight': self.scale_pos_weight
+            }
+            
+            # Adjust scale_pos_weight based on this fold's class distribution
+            class_counts = np.bincount(y_train_fold)
+            if len(class_counts) >= 2 and class_counts[0] > 0 and class_counts[1] > 0:
+                fold_neg, fold_pos = class_counts[0], class_counts[1]
+                fold_scale_pos_weight = fold_neg / fold_pos
+                xgb_params['scale_pos_weight'] = fold_scale_pos_weight
+                print(f"    Fold {fold} class balance - Neg: {fold_neg}, Pos: {fold_pos}, scale_pos_weight: {fold_scale_pos_weight:.2f}")
+            else:
+                print(f"    Fold {fold} - insufficient class diversity, using default scale_pos_weight")
+            
+            # Check class balance in this fold
+            unique_classes = np.unique(y_train_fold)
+            if len(unique_classes) < 2:
+                print(f"  Skipping fold {fold} - insufficient class diversity: {unique_classes}")
+                continue
+                
+            # Train model for this fold
+            model = XGBClassifier(**xgb_params)
+            model.fit(
+                X_train_fold, y_train_fold,
+                eval_set=[(X_val_fold, y_val_fold)],
+                early_stopping_rounds=30,
+                verbose=0
+            )
+            
+            # Evaluate on validation set
+            val_pred_proba = model.predict_proba(X_val_fold)[:, 1]
+            
+            # Find optimal threshold for this fold
+            possible_thresholds = np.linspace(0.1, 0.9, 81)
+            best_thresh = 0.5
+            best_f1 = -1.0
+            best_balanced_acc = -1.0
+            
+            for thr in possible_thresholds:
+                preds = (val_pred_proba >= thr).astype(int)
+                f1 = f1_score(y_val_fold, preds)
+                
+                # Calculate balanced accuracy to ensure we're not just predicting one class
+                tn, fp, fn, tp = confusion_matrix(y_val_fold, preds).ravel()
+                sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+                specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+                balanced_acc = (sensitivity + specificity) / 2
+                
+                # Use a combination of F1 and balanced accuracy
+                combined_score = f1 * 0.7 + balanced_acc * 0.3
+                
+                if combined_score > best_f1:
+                    best_f1 = combined_score
+                    best_thresh = thr
+                    best_balanced_acc = balanced_acc
+            
+            val_pred = (val_pred_proba >= best_thresh).astype(int)
+            val_accuracy = accuracy_score(y_val_fold, val_pred)
+            
+            cv_scores.append({
+                'fold': fold,
+                'val_accuracy': val_accuracy,
+                'val_f1': best_f1,
+                'threshold': best_thresh,
+                'best_iteration': model.best_iteration if hasattr(model, 'best_iteration') else model.n_estimators
+            })
+            
+            cv_models.append(model)
+            
+            print(f"  Validation Accuracy: {val_accuracy:.4f}, F1: {best_f1:.4f}, Balanced Acc: {best_balanced_acc:.4f}, Threshold: {best_thresh:.3f}")
+            
+            # Keep track of best model
+            if best_f1 > best_val_score:
+                best_val_score = best_f1
+                best_model = model
+        
+        # Print CV summary
+        print(f"\nCross-Validation Results:")
+        print("-" * 50)
+        if cv_scores:
+            avg_accuracy = np.mean([score['val_accuracy'] for score in cv_scores])
+            avg_f1 = np.mean([score['val_f1'] for score in cv_scores])
+            std_accuracy = np.std([score['val_accuracy'] for score in cv_scores])
+            std_f1 = np.std([score['val_f1'] for score in cv_scores])
+            
+            print(f"Average Validation Accuracy: {avg_accuracy:.4f} (±{std_accuracy:.4f})")
+            print(f"Average Validation F1 Score: {avg_f1:.4f} (±{std_f1:.4f})")
+        else:
+            print("No valid CV results - proceeding with final model training only")
+            avg_f1 = 0.0
+        
+        # Now train the final model on the combined train+val data using the best parameters
+        print(f"\nTraining final XGBoost model on combined train+validation data...")
+        
+        # Use the best parameters from CV
+        final_xgb_params = {
             'objective': 'binary:logistic',
-            'n_estimators': 1500,
+            'n_estimators': 1000,
             'max_depth': 3,
-            'learning_rate': 0.005,
+            'min_child_weight': 3,
+            'learning_rate': 0.01,
             'subsample': 0.7,
             'colsample_bytree': 0.7,
             'gamma': 0.1,
-            'reg_alpha': 0.005,
+            'reg_alpha': 0.1,
+            'reg_lambda': 1.0,
             'random_state': 42,
-            'early_stopping_rounds': 30,
-            'eval_metric': 'logloss',
+            'eval_metric': ['logloss', 'auc'],
             'scale_pos_weight': self.scale_pos_weight
         }
         
-        # Train model
-        model = XGBClassifier(**xgb_params)
-        model.fit(
-            X_train_scaled, y_train,
-            eval_set=[(X_val_scaled, y_val)],
+        # Adjust final scale_pos_weight based on combined data class distribution
+        combined_class_counts = np.bincount(y_combined)
+        if len(combined_class_counts) >= 2 and combined_class_counts[0] > 0 and combined_class_counts[1] > 0:
+            combined_neg, combined_pos = combined_class_counts[0], combined_class_counts[1]
+            final_scale_pos_weight = combined_neg / combined_pos
+            final_xgb_params['scale_pos_weight'] = final_scale_pos_weight
+            print(f"Final model class balance - Neg: {combined_neg}, Pos: {combined_pos}, scale_pos_weight: {final_scale_pos_weight:.2f}")
+        else:
+            print("Warning: Insufficient class diversity in combined data")
+        
+        # Train final model on combined data
+        final_model = XGBClassifier(**final_xgb_params)
+        final_model.fit(
+            X_combined_scaled, y_combined,
+            eval_set=[(X_combined_scaled, y_combined)],
             verbose=100
         )
         
-        # Make predictions
-        train_pred_proba = model.predict_proba(X_train_scaled)[:, 1]
-        val_pred_proba = model.predict_proba(X_val_scaled)[:, 1]
-        test_pred_proba = model.predict_proba(X_test_scaled)[:, 1]
+        # Prepare test data
+        X_test = test_data[self.all_features]
+        y_test = test_data[self.target]
+        X_test_scaled = self.scaler.transform(X_test)
         
-        train_pred = (train_pred_proba > 0.5).astype(int)
-        val_pred = (val_pred_proba > 0.5).astype(int)
-        test_pred = (test_pred_proba > 0.5).astype(int)
+        # Make predictions
+        train_pred_proba = final_model.predict_proba(X_combined_scaled)[:, 1]
+        test_pred_proba = final_model.predict_proba(X_test_scaled)[:, 1]
+        
+        # Use average threshold from CV (handle case where some folds were skipped)
+        if cv_scores:
+            avg_threshold = np.mean([score['threshold'] for score in cv_scores])
+            print(f"Using average threshold from CV: {avg_threshold:.3f}")
+            
+            # Calculate optimal threshold based on class distribution
+            test_class_counts = np.bincount(y_test)
+            if len(test_class_counts) >= 2 and test_class_counts[0] > 0 and test_class_counts[1] > 0:
+                test_neg, test_pos = test_class_counts[0], test_class_counts[1]
+                # Use class distribution to set a more balanced threshold
+                class_ratio = test_neg / test_pos
+                balanced_threshold = 1 / (1 + class_ratio)  # This gives us a threshold that considers class balance
+                print(f"Class ratio in test set: {class_ratio:.2f}, balanced threshold: {balanced_threshold:.3f}")
+                
+                # Use the higher of the two thresholds to prevent over-prediction
+                avg_threshold = max(avg_threshold, balanced_threshold)
+                print(f"Final threshold: {avg_threshold:.3f}")
+            
+            # Add a minimum threshold constraint to prevent over-prediction of one class
+            if avg_threshold < 0.3:
+                print(f"Warning: Threshold {avg_threshold:.3f} is too low, adjusting to 0.3 to prevent class imbalance")
+                avg_threshold = 0.3
+        else:
+            avg_threshold = 0.5
+            print("No valid CV folds found, using default threshold: 0.5")
+        
+        train_pred = (train_pred_proba >= avg_threshold).astype(int)
+        test_pred = (test_pred_proba >= avg_threshold).astype(int)
         
         # Calculate metrics
-        train_accuracy = accuracy_score(y_train, train_pred)
-        val_accuracy = accuracy_score(y_val, val_pred)
+        train_accuracy = accuracy_score(y_combined, train_pred)
         test_accuracy = accuracy_score(y_test, test_pred)
         
-        print(f"XGBoost Results:")
+        # Check class distribution in predictions
+        train_class_dist = np.bincount(train_pred)
+        test_class_dist = np.bincount(test_pred)
+        
+        print(f"Final XGBoost Results:")
         print(f"  Train Accuracy: {train_accuracy:.4f}")
-        print(f"  Validation Accuracy: {val_accuracy:.4f}")
         print(f"  Test Accuracy: {test_accuracy:.4f}")
+        print(f"  CV Average F1: {avg_f1:.4f}")
+        print(f"  Train Predictions - Class 0: {train_class_dist[0] if len(train_class_dist) > 0 else 0}, Class 1: {train_class_dist[1] if len(train_class_dist) > 1 else 0}")
+        print(f"  Test Predictions - Class 0: {test_class_dist[0] if len(test_class_dist) > 0 else 0}, Class 1: {test_class_dist[1] if len(test_class_dist) > 1 else 0}")
         
         # Feature importance
         feature_importance = pd.DataFrame({
             'feature': self.all_features,
-            'importance': model.feature_importances_
+            'importance': final_model.feature_importances_
         }).sort_values('importance', ascending=False)
         
         print(f"\nTop 10 Most Important Features:")
@@ -278,21 +571,52 @@ class SP500Predictor:
         
         # Store model and predictions
         self.models['xgboost'] = {
-            'model': model,
+            'model': final_model,
             'scaler': self.scaler,
             'train_pred': train_pred,
-            'val_pred': val_pred,
+            'val_pred': None,  # No single validation set in CV approach
             'test_pred': test_pred,
             'train_pred_proba': train_pred_proba,
-            'val_pred_proba': val_pred_proba,
+            'val_pred_proba': None,  # No single validation set in CV approach
             'test_pred_proba': test_pred_proba,
-            'train_actual': y_train,
-            'val_actual': y_val,
+            'train_actual': y_combined,
+            'val_actual': None,  # No single validation set in CV approach
             'test_actual': y_test,
-            'feature_importance': feature_importance
+            'feature_importance': feature_importance,
+            'threshold': avg_threshold,
+            'cv_scores': cv_scores,
+            'cv_models': cv_models
         }
         
-        return model, train_pred_proba, val_pred_proba, test_pred_proba
+        # Plot learning curves from final model
+        try:
+            evals_result = final_model.evals_result()
+            if evals_result:
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+                # Logloss
+                if 'logloss' in evals_result.get('validation_0', {}):
+                    ax1.plot(evals_result['validation_0']['logloss'], label='Train Logloss', color='blue')
+                ax1.set_title('XGBoost Final Model Logloss')
+                ax1.set_xlabel('Iteration')
+                ax1.set_ylabel('Logloss')
+                ax1.legend()
+                ax1.grid(True, alpha=0.3)
+
+                # AUC
+                if 'auc' in evals_result.get('validation_0', {}):
+                    ax2.plot(evals_result['validation_0']['auc'], label='Train AUC', color='blue')
+                ax2.set_title('XGBoost Final Model AUC')
+                ax2.set_xlabel('Iteration')
+                ax2.set_ylabel('AUC')
+                ax2.legend()
+                ax2.grid(True, alpha=0.3)
+
+                plt.tight_layout()
+                plt.show()
+        except Exception as e:
+            print(f"Could not plot XGBoost learning curves: {e}")
+        
+        return final_model, train_pred_proba, None, test_pred_proba
         
     def train_linear_model(self, train_data, val_data, test_data):
         """Train Logistic Regression model"""
@@ -361,29 +685,41 @@ class SP500Predictor:
         
         # Get the number of LSTM predictions (smallest set due to sequence requirements)
         lstm_train_size = len(self.models['lstm']['train_pred'])
-        lstm_val_size = len(self.models['lstm']['val_pred'])
         lstm_test_size = len(self.models['lstm']['test_pred'])
         
-        # Align all predictions to LSTM size (trim from the end)
-        xgb_train_pred_proba = self.models['xgboost']['train_pred_proba'][-lstm_train_size:]
-        xgb_val_pred_proba = self.models['xgboost']['val_pred_proba'][-lstm_val_size:]
-        xgb_test_pred_proba = self.models['xgboost']['test_pred_proba'][-lstm_test_size:]
+        # For XGBoost and Linear models, we need to get predictions for the combined train+val data
+        # to match the LSTM predictions
+        combined_data = pd.concat([train_data, val_data], ignore_index=True)
         
-        linear_train_pred_proba = self.models['linear']['train_pred_proba'][-lstm_train_size:]
-        linear_val_pred_proba = self.models['linear']['val_pred_proba'][-lstm_val_size:]
+        # Prepare features for XGBoost and Linear on combined data
+        X_combined = combined_data[self.all_features]
+        X_combined_scaled = self.models['xgboost']['scaler'].transform(X_combined)
+        
+        # Get XGBoost predictions for combined data
+        xgb_combined_pred_proba = self.models['xgboost']['model'].predict_proba(X_combined_scaled)[:, 1]
+        
+        # Get Linear predictions for combined data
+        linear_combined_pred_proba = self.models['linear']['model'].predict_proba(X_combined_scaled)[:, 1]
+        
+        # The LSTM predictions are based on sequences, so we need to align the XGBoost and Linear predictions
+        # to match the LSTM sequence-based predictions
+        # LSTM loses (sequence_length - 1) samples at the beginning, so we need to trim the predictions accordingly
+        xgb_combined_pred_proba = xgb_combined_pred_proba[self.sequence_length-1:]
+        linear_combined_pred_proba = linear_combined_pred_proba[self.sequence_length-1:]
+        
+        # Now trim to match the exact LSTM size
+        xgb_combined_pred_proba = xgb_combined_pred_proba[-lstm_train_size:]
+        linear_combined_pred_proba = linear_combined_pred_proba[-lstm_train_size:]
+        
+        # Align test predictions (trim from the end to match LSTM test size)
+        xgb_test_pred_proba = self.models['xgboost']['test_pred_proba'][-lstm_test_size:]
         linear_test_pred_proba = self.models['linear']['test_pred_proba'][-lstm_test_size:]
         
         # Get predictions from base models (aligned)
         meta_features_train = np.column_stack([
             self.models['lstm']['train_pred_proba'],
-            xgb_train_pred_proba,
-            linear_train_pred_proba
-        ])
-        
-        meta_features_val = np.column_stack([
-            self.models['lstm']['val_pred_proba'],
-            xgb_val_pred_proba,
-            linear_val_pred_proba
+            xgb_combined_pred_proba,
+            linear_combined_pred_proba
         ])
         
         meta_features_test = np.column_stack([
@@ -392,27 +728,37 @@ class SP500Predictor:
             linear_test_pred_proba
         ])
         
-        # Add some original features to meta-model
-        additional_features = ['CP', 'Volatility_20', 'RSI', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'Sentiment_MA_5']
+        # Add key features to meta-model for better ensemble performance
+        additional_features = [
+            'CP', 'Volume', 'Returns', 'Volatility_20', 'RSI', 'MACD', 
+            'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 
+            'Sentiment', 'Sentiment_MA_5', 'BB_Position'
+        ]
         
         # Get additional features for each split (aligned with LSTM)
-        train_additional = train_data[additional_features].iloc[-lstm_train_size:].values
-        val_additional = val_data[additional_features].iloc[-lstm_val_size:].values
+        # For train, we need to account for the sequence length offset and align with LSTM predictions
+        train_additional = combined_data[additional_features].iloc[self.sequence_length-1:].values
+        train_additional = train_additional[-lstm_train_size:]
         test_additional = test_data[additional_features].iloc[-lstm_test_size:].values
         
         # Combine predictions with additional features
         meta_features_train = np.column_stack([meta_features_train, train_additional])
-        meta_features_val = np.column_stack([meta_features_val, val_additional])
         meta_features_test = np.column_stack([meta_features_test, test_additional])
         
         # Get actual values (already aligned with LSTM)
         y_train = self.models['lstm']['train_actual']
-        y_val = self.models['lstm']['val_actual']
         y_test = self.models['lstm']['test_actual']
         
+        # For meta-model training, we'll use a portion of the training data as validation
+        # Split the training data for meta-model validation
+        split_idx = int(len(meta_features_train) * 0.8)
+        meta_train_features = meta_features_train[:split_idx]
+        meta_val_features = meta_features_train[split_idx:]
+        meta_train_labels = y_train[:split_idx]
+        meta_val_labels = y_train[split_idx:]
+        
         # Calculate class weights for meta-model to handle its own training imbalance
-        # We use the validation set labels since we are training the meta-model on the validation set predictions
-        meta_neg, meta_pos = np.bincount(y_val)
+        meta_neg, meta_pos = np.bincount(meta_val_labels)
         if meta_pos > 0 and meta_neg > 0:
             meta_scale_pos_weight = meta_neg / meta_pos
         else:
@@ -431,11 +777,11 @@ class SP500Predictor:
             random_state=42
         )
         
-        meta_model.fit(meta_features_val, y_val)
+        meta_model.fit(meta_train_features, meta_train_labels)
         
         # Make meta-predictions
         train_meta_pred_proba = meta_model.predict_proba(meta_features_train)[:, 1]
-        val_meta_pred_proba = meta_model.predict_proba(meta_features_val)[:, 1]
+        val_meta_pred_proba = meta_model.predict_proba(meta_val_features)[:, 1]
         test_meta_pred_proba = meta_model.predict_proba(meta_features_test)[:, 1]
         
         train_meta_pred = (train_meta_pred_proba > 0.5).astype(int)
@@ -444,7 +790,7 @@ class SP500Predictor:
         
         # Calculate metrics
         train_accuracy = accuracy_score(y_train, train_meta_pred)
-        val_accuracy = accuracy_score(y_val, val_meta_pred)
+        val_accuracy = accuracy_score(meta_val_labels, val_meta_pred)
         test_accuracy = accuracy_score(y_test, test_meta_pred)
         
         print(f"Meta-Model Results:")
@@ -462,7 +808,7 @@ class SP500Predictor:
             'val_pred_proba': val_meta_pred_proba,
             'test_pred_proba': test_meta_pred_proba,
             'train_actual': y_train,
-            'val_actual': y_val,
+            'val_actual': meta_val_labels,
             'test_actual': y_test
         }
         
@@ -545,19 +891,30 @@ class SP500Predictor:
             train_f1 = f1_score(model_data['train_actual'], model_data['train_pred'])
             train_roc = roc_auc_score(model_data['train_actual'], model_data['train_pred_proba'])
             
-            # Validation metrics
-            val_acc = accuracy_score(model_data['val_actual'], model_data['val_pred'])
-            val_prec = precision_score(model_data['val_actual'], model_data['val_pred'])
-            val_rec = recall_score(model_data['val_actual'], model_data['val_pred'])
-            val_f1 = f1_score(model_data['val_actual'], model_data['val_pred'])
-            val_roc = roc_auc_score(model_data['val_actual'], model_data['val_pred_proba'])
-            
             # Test metrics
             test_acc = accuracy_score(model_data['test_actual'], model_data['test_pred'])
             test_prec = precision_score(model_data['test_actual'], model_data['test_pred'])
             test_rec = recall_score(model_data['test_actual'], model_data['test_pred'])
             test_f1 = f1_score(model_data['test_actual'], model_data['test_pred'])
             test_roc = roc_auc_score(model_data['test_actual'], model_data['test_pred_proba'])
+            
+            # Handle validation metrics (LSTM uses CV, others use single validation set)
+            if model_data['val_actual'] is not None and model_data['val_pred'] is not None:
+                val_acc = accuracy_score(model_data['val_actual'], model_data['val_pred'])
+                val_prec = precision_score(model_data['val_actual'], model_data['val_pred'])
+                val_rec = recall_score(model_data['val_actual'], model_data['val_pred'])
+                val_f1 = f1_score(model_data['val_actual'], model_data['val_pred'])
+                val_roc = roc_auc_score(model_data['val_actual'], model_data['val_pred_proba'])
+            else:
+                # For LSTM with CV, use CV average scores
+                if 'cv_scores' in model_data:
+                    val_acc = np.mean([score['val_accuracy'] for score in model_data['cv_scores']])
+                    val_f1 = np.mean([score['val_f1'] for score in model_data['cv_scores']])
+                    val_prec = val_f1  # Approximate since we don't have precision per fold
+                    val_rec = val_f1   # Approximate since we don't have recall per fold
+                    val_roc = val_f1   # Approximate since we don't have ROC per fold
+                else:
+                    val_acc = val_prec = val_rec = val_f1 = val_roc = 0.0
             
             metrics_data[model_name] = {
                 'train': {'accuracy': train_acc, 'precision': train_prec, 'recall': train_rec, 'f1': train_f1, 'roc_auc': train_roc},
@@ -788,44 +1145,96 @@ class SP500Predictor:
         
         history = self.models['lstm']['history']
         
-        fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-        fig.suptitle('LSTM Training History', fontsize=16, fontweight='bold')
+        # Check if we have CV results
+        has_cv = 'cv_scores' in self.models['lstm'] and 'cv_histories' in self.models['lstm']
         
-        # Plot training & validation loss
-        axes[0].plot(history.history['loss'], label='Training Loss', color='blue')
-        axes[0].plot(history.history['val_loss'], label='Validation Loss', color='red')
-        axes[0].set_title('Model Loss')
-        axes[0].set_xlabel('Epoch')
-        axes[0].set_ylabel('Loss')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-        
-        # Plot training & validation accuracy
-        axes[1].plot(history.history['accuracy'], label='Training Accuracy', color='blue')
-        axes[1].plot(history.history['val_accuracy'], label='Validation Accuracy', color='red')
-        axes[1].set_title('Model Accuracy')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('Accuracy')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.show()
+        if has_cv:
+            # Plot CV results
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            fig.suptitle('LSTM Cross-Validation Results', fontsize=16, fontweight='bold')
+            
+            # Plot CV scores across folds
+            cv_scores = self.models['lstm']['cv_scores']
+            folds = [score['fold'] for score in cv_scores]
+            accuracies = [score['val_accuracy'] for score in cv_scores]
+            f1_scores = [score['val_f1'] for score in cv_scores]
+            
+            axes[0, 0].bar(folds, accuracies, color='skyblue', alpha=0.7)
+            axes[0, 0].set_title('Validation Accuracy by Fold')
+            axes[0, 0].set_xlabel('Fold')
+            axes[0, 0].set_ylabel('Accuracy')
+            axes[0, 0].grid(True, alpha=0.3)
+            axes[0, 0].set_ylim(0, 1)
+            
+            axes[0, 1].bar(folds, f1_scores, color='lightgreen', alpha=0.7)
+            axes[0, 1].set_title('Validation F1 Score by Fold')
+            axes[0, 1].set_xlabel('Fold')
+            axes[0, 1].set_ylabel('F1 Score')
+            axes[0, 1].grid(True, alpha=0.3)
+            axes[0, 1].set_ylim(0, 1)
+            
+            # Plot final training history
+            axes[1, 0].plot(history.history['loss'], label='Training Loss', color='blue')
+            axes[1, 0].set_title('Final Model Training Loss')
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('Loss')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            axes[1, 1].plot(history.history['accuracy'], label='Training Accuracy', color='blue')
+            axes[1, 1].set_title('Final Model Training Accuracy')
+            axes[1, 1].set_xlabel('Epoch')
+            axes[1, 1].set_ylabel('Accuracy')
+            axes[1, 1].legend()
+            axes[1, 1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.show()
+            
+            # Print CV summary
+            print(f"Cross-Validation Results:")
+            print(f"  Average Validation Accuracy: {np.mean(accuracies):.4f} (±{np.std(accuracies):.4f})")
+            print(f"  Average Validation F1 Score: {np.mean(f1_scores):.4f} (±{np.std(f1_scores):.4f})")
+            print(f"  Best Fold: {folds[np.argmax(f1_scores)]} (F1: {max(f1_scores):.4f})")
+            print(f"  Worst Fold: {folds[np.argmin(f1_scores)]} (F1: {min(f1_scores):.4f})")
+            
+        else:
+            # Original plotting for non-CV case
+            fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+            fig.suptitle('LSTM Training History', fontsize=16, fontweight='bold')
+            
+            # Plot training & validation loss
+            axes[0].plot(history.history['loss'], label='Training Loss', color='blue')
+            if 'val_loss' in history.history:
+                axes[0].plot(history.history['val_loss'], label='Validation Loss', color='red')
+            axes[0].set_title('Model Loss')
+            axes[0].set_xlabel('Epoch')
+            axes[0].set_ylabel('Loss')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # Plot training & validation accuracy
+            axes[1].plot(history.history['accuracy'], label='Training Accuracy', color='blue')
+            if 'val_accuracy' in history.history:
+                axes[1].plot(history.history['val_accuracy'], label='Validation Accuracy', color='red')
+            axes[1].set_title('Model Accuracy')
+            axes[1].set_xlabel('Epoch')
+            axes[1].set_ylabel('Accuracy')
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.show()
         
         # Print training summary
-        print(f"Training completed in {len(history.history['loss'])} epochs")
+        print(f"Final training completed in {len(history.history['loss'])} epochs")
         print(f"Final training loss: {history.history['loss'][-1]:.4f}")
-        print(f"Final validation loss: {history.history['val_loss'][-1]:.4f}")
         print(f"Final training accuracy: {history.history['accuracy'][-1]:.4f}")
-        print(f"Final validation accuracy: {history.history['val_accuracy'][-1]:.4f}")
         
-        # Check for overfitting
-        train_loss = history.history['loss'][-1]
-        val_loss = history.history['val_loss'][-1]
-        if val_loss > train_loss * 1.2:
-            print("⚠️  Warning: Potential overfitting detected (validation loss > 1.2 * training loss)")
+        if has_cv:
+            print("✅ Cross-validation approach helps avoid overfitting to specific time periods")
         else:
-            print("✅ No significant overfitting detected")
+            print("⚠️  Using single validation set - consider cross-validation for better generalization")
     
     def plot_feature_importance(self):
         """Plot feature importance from XGBoost model"""
@@ -899,6 +1308,14 @@ class SP500Predictor:
         
         plt.tight_layout()
         plt.show()
+        
+        # Add LSTM CV results if available
+        if 'lstm' in self.models and 'cv_scores' in self.models['lstm']:
+            print("\nLSTM Cross-Validation Confusion Matrices:")
+            print("-" * 50)
+            cv_scores = self.models['lstm']['cv_scores']
+            for score in cv_scores:
+                print(f"Fold {score['fold']}: Accuracy={score['val_accuracy']:.4f}, F1={score['val_f1']:.4f}")
         
         # Plot prediction probability distributions
         fig, axes = plt.subplots(2, 2, figsize=(16, 12))

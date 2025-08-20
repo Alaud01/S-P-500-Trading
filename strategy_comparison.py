@@ -69,25 +69,101 @@ class StrategyComparer:
         historical_df['Date'] = pd.to_datetime(historical_df['Date'])
         historical_df = historical_df[historical_df['Date'] <= date]
         
-        # Prepare features
+        # Prepare features - using all available features
         technical_features = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'MA_5', 'MA_20', 'MA_50', 
-            'RSI', 'MACD', 'MACD_Signal', 'BB_Position', 'BB_Width', 'Volatility_20', 
-            'Volume_Ratio', 'Price_Change_5d', 'Price_Change_20d', 'Sentiment_MA_5'
+            # Price and Volume data
+            'CP', 'Open', 'High', 'Low', 'Close', 'Adj_Close', 'Volume',
+            # Economic indicators
+            'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate',
+            # News sentiment
+            'Headline_Count', 'Sentiment', 'Sentiment_MA_5',
+            # Returns
+            'Returns', 'Log_Returns',
+            # Moving averages
+            'MA_5', 'MA_20', 'MA_50', 'MA_200',
+            # Technical indicators
+            'Volatility_20', 'RSI', 'BB_Middle', 'BB_Upper', 'BB_Lower', 'BB_Width', 'BB_Position',
+            'MACD', 'MACD_Signal', 'MACD_Histogram',
+            # Price changes
+            'Price_Change_5d', 'Price_Change_20d',
+            # Volume indicators
+            'Volume_MA_20', 'Volume_Ratio'
         ]
         lag_features = [f'Price_Lag_{lag}' for lag in [1, 5, 10, 20]] + [f'Returns_Lag_{lag}' for lag in [1, 5, 10, 20]]
         all_features = technical_features + lag_features
         
         lstm_features = [
-            'CP', 'Volume', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'RSI', 'MACD', 'Volatility_20', 
-            'BB_Position', 'Sentiment_MA_5'
+            # Core price and volume
+            'CP', 'Volume', 'Returns',
+            # Economic indicators
+            'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate',
+            # Sentiment
+            'Sentiment', 'Sentiment_MA_5',
+            # Key technical indicators
+            'RSI', 'MACD', 'Volatility_20', 'BB_Position'
         ]
         
+        # Check for NaN values and handle them
         xgb_linear_features = data_for_date[all_features]
+        
+        # Check if any features have NaN values
+        if xgb_linear_features.isnull().any().any():
+            print(f"Warning: NaN values found in features for date {date}. Using forward fill and median imputation.")
+            # Forward fill for time series data
+            xgb_linear_features = xgb_linear_features.fillna(method='ffill')
+            # Backward fill for any remaining NaN values
+            xgb_linear_features = xgb_linear_features.fillna(method='bfill')
+            # For any remaining NaN values, use median imputation
+            xgb_linear_features = xgb_linear_features.fillna(xgb_linear_features.median())
+            # If still NaN (all values were NaN), use 0
+            xgb_linear_features = xgb_linear_features.fillna(0)
+            
+        # Final check - if any NaN values remain, replace with 0
+        if xgb_linear_features.isnull().any().any():
+            print(f"Warning: Still NaN values found after imputation for date {date}. Replacing with 0.")
+            xgb_linear_features = xgb_linear_features.fillna(0)
         
         # LSTM sequence
         sequence_length = 60
+        
+        # Check LSTM features for NaN values
         lstm_sequence = historical_df[lstm_features].iloc[-sequence_length:].values
+        if np.isnan(lstm_sequence).any():
+            print(f"Warning: NaN values found in LSTM sequence for date {date}. Using forward fill and median imputation.")
+            # Convert to DataFrame for easier handling
+            lstm_df = pd.DataFrame(lstm_sequence, columns=lstm_features)
+            lstm_df = lstm_df.fillna(method='ffill').fillna(method='bfill')
+            # For any remaining NaN values, use median imputation
+            lstm_df = lstm_df.fillna(lstm_df.median())
+            # If still NaN (all values were NaN), use 0
+            lstm_df = lstm_df.fillna(0)
+            lstm_sequence = lstm_df.values
+            
+        # Final check for LSTM sequence
+        if np.isnan(lstm_sequence).any():
+            print(f"Warning: Still NaN values found in LSTM sequence after imputation for date {date}. Replacing with 0.")
+            lstm_sequence = np.nan_to_num(lstm_sequence, nan=0.0)
+        
+        # Check additional features for NaN values
+        additional_features_list = [
+            'CP', 'Volume', 'Returns', 'Volatility_20', 'RSI', 'MACD', 
+            'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 
+            'Sentiment', 'Sentiment_MA_5', 'BB_Position'
+        ]
+        additional_values = data_for_date[additional_features_list].values
+        if np.isnan(additional_values).any():
+            print(f"Warning: NaN values found in additional features for date {date}. Using forward fill and median imputation.")
+            additional_df = pd.DataFrame(additional_values, columns=additional_features_list)
+            additional_df = additional_df.fillna(method='ffill').fillna(method='bfill')
+            additional_df = additional_df.fillna(additional_df.median())
+            # If still NaN (all values were NaN), use 0
+            additional_df = additional_df.fillna(0)
+            additional_values = additional_df.values
+            
+        # Final check for additional features
+        if np.isnan(additional_values).any():
+            print(f"Warning: Still NaN values found in additional features after imputation for date {date}. Replacing with 0.")
+            additional_values = np.nan_to_num(additional_values, nan=0.0)
         
         # Make base predictions
         xgb_scaled = self.scalers['xgboost'].transform(xgb_linear_features)
@@ -102,9 +178,6 @@ class StrategyComparer:
         
         # Meta-model prediction
         base_model_preds = np.array([[lstm_pred_proba, xgb_pred_proba, linear_pred_proba]])
-        additional_features_list = ['CP', 'Volatility_20', 'RSI', 'Interest_Rate', 'Inflation_Rate', 'GDP', 'Gold_Price', 'Unemployment_Rate', 'Sentiment_MA_5']
-        additional_values = data_for_date[additional_features_list].values
-        
         meta_features = np.column_stack([base_model_preds, additional_values])
         meta_pred_proba = self.models['meta'].predict_proba(meta_features)[0]
         
@@ -156,9 +229,9 @@ class StrategyComparer:
         trades_this_month = 0
 
         # --- Strategy Parameters ---
-        trade_decision_threshold = 0.65   # Threshold for 20-day moving average (buy when > 0.65)
-        sell_threshold = 0.4              # Start selling when prediction < 0.4
-        max_sell_threshold = 0.4          # Sell all when prediction <= 0.4 (same as sell_threshold for immediate selling)
+        trade_decision_threshold = 0.55   # Threshold for 20-day moving average (buy when > 0.55)
+        sell_threshold = 0.45             # Start selling when prediction < 0.45
+        max_sell_threshold = 0.45         # Sell all when prediction <= 0.45 (same as sell_threshold for immediate selling)
         max_trades_per_month = 15         # Limit number of trades per month
         min_investment_ratio = 0.2       # At least 20% of available funds
         # --- End of Parameters ---
@@ -656,8 +729,8 @@ class StrategyComparer:
         ax1_twin.set_ylim(0, 1)
         
         # Add threshold lines
-        buy_threshold = 0.65  # Buy threshold
-        sell_threshold = 0.4  # Sell threshold
+        buy_threshold = 0.55  # Buy threshold
+        sell_threshold = 0.45  # Sell threshold
         ax1_twin.axhline(y=buy_threshold, color='orange', linestyle='--', alpha=0.7, 
                         label=f'Buy Threshold ({buy_threshold})')
         ax1_twin.axhline(y=sell_threshold, color='red', linestyle='--', alpha=0.7, 
