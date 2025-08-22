@@ -1,14 +1,14 @@
 {
   "device": "mps",
   "final_params": {
-    "seq_len": 60,
-    "hidden_size": 64,
-    "num_layers": 2,
-    "dropout": 0.2,
-    "batch_size": 128,
-    "epochs": 100,
-    "patience": 15,
-    "lr": 0.0005,
+    "seq_len": 30,
+    "hidden_size": 32,
+    "num_layers": 1,
+    "dropout": 0.1,
+    "batch_size": 64,
+    "epochs": 8,
+    "patience": 3,
+    "lr": 0.001,
     "weight_decay": 1e-05,
     "verbose": true,
     "log_every": 1,
@@ -20,7 +20,7 @@
     "threshold_metric": "f1"
   },
   "models_dir": "models",
-  "model_path": "models/lstm_best_20250822_111252.pt",
+  "model_path": "models/lstm_best_20250822_112712.pt",
   "dataset_info": {
     "shape": [
       5878,
@@ -77,24 +77,24 @@
     "positive_class_ratio": 0.6241919020074855
   },
   "training_info": {
-    "timestamp": "2025-08-22 11:12:52",
+    "timestamp": "2025-08-22 11:27:12",
     "seed": 42,
-    "smoke_test": false
+    "smoke_test": true
   },
   "cv_metrics": {
-    "auc": 0.4573276487106198,
-    "accuracy": 0.6155555555555556,
-    "balanced_accuracy": 0.5043931354359925,
-    "precision": 0.6198135472981605,
-    "recall": 0.9855333333333334,
-    "f1": 0.7558199845784022
+    "auc": 0.659470102936926,
+    "accuracy": 0.6333333333333333,
+    "balanced_accuracy": 0.5,
+    "precision": 0.6333333333333333,
+    "recall": 1.0,
+    "f1": 0.7664476201549285
   },
   "holdout_metrics_since_2022-01-01": {
-    "auc": 0.5179892141756548,
-    "accuracy": 0.5265306122448979,
-    "balanced_accuracy": 0.4872496147919877,
-    "precision": 0.58984375,
-    "recall": 0.6863636363636364,
-    "f1": 0.634453781512605
+    "auc": 0.49535987234399936,
+    "accuracy": 0.5725490196078431,
+    "balanced_accuracy": 0.512156714537667,
+    "precision": 0.5830903790087464,
+    "recall": 0.9070294784580499,
+    "f1": 0.709849157054126
   }
 }

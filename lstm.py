@@ -807,6 +807,227 @@ def plot_training_history(fold_histories: List[Dict[str, List[float]]],
     plt.show()
 
 
+def plot_test_predictions_vs_price(model_path: str, 
+                                 data_csv: str,
+                                 models_dir: str,
+                                 test_start_date: str,
+                                 device: torch.device,
+                                 verbose: bool = True):
+    """
+    Create a plot showing model predictions vs S&P 500 price for the test set (2022 onwards).
+    """
+    if not verbose:
+        return
+        
+    print("  📊 Generating test set predictions vs price visualization...")
+    
+    # Load the trained model
+    checkpoint = torch.load(model_path, map_location=device)
+    model = LSTMClassifier(
+        input_size=len(checkpoint['feature_names']),
+        hidden_size=checkpoint['params']['hidden_size'],
+        num_layers=checkpoint['params']['num_layers'],
+        dropout=checkpoint['params']['dropout'],
+        bidirectional=checkpoint['params'].get('bidirectional', False)
+    ).to(device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    
+    # Load and prepare data
+    df = load_dataset(data_csv)
+    X_df, y, feature_names = select_features_and_target(df)
+    X = X_df.values.astype(np.float32)
+    
+    # Split data into train and test based on date
+    test_start = pd.to_datetime(test_start_date)
+    if 'Date' in df.columns:
+        test_mask = df['Date'] >= test_start
+        train_mask = ~test_mask
+        
+        X_train = X[train_mask]
+        X_test = X[test_mask]
+        y_train = y[train_mask]
+        y_test = y[test_mask]
+        test_dates = df['Date'][test_mask].values
+        test_prices = df['Close'][test_mask].values if 'Close' in df.columns else None
+    else:
+        # Fallback if no date column
+        split_idx = int(len(X) * 0.8)
+        X_train = X[:split_idx]
+        X_test = X[split_idx:]
+        y_train = y[:split_idx]
+        y_test = y[split_idx:]
+        test_dates = np.arange(len(X_test))
+        test_prices = None
+    
+    # Scale data using only training data (no data leakage)
+    scaler = StandardScaler().fit(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    # Build sequences for test set
+    seq_len = checkpoint['seq_len']
+    X_test_seq, y_test_seq = build_sequences(X_test_scaled, y_test, seq_len)
+    
+    # Get predictions for test set
+    model.eval()
+    predictions = []
+    with torch.no_grad():
+        for i in range(0, len(X_test_seq), 128):  # Process in batches
+            batch = X_test_seq[i:i+128]
+            batch_tensor = torch.from_numpy(batch).float().to(device)
+            logits = model(batch_tensor)
+            probs = torch.sigmoid(logits)
+            predictions.extend(probs.cpu().numpy())
+    
+    predictions = np.array(predictions)
+    
+    # Adjust dates and prices for sequence offset
+    if test_prices is not None:
+        test_prices = test_prices[seq_len-1:]
+    test_dates = test_dates[seq_len-1:]
+    
+    # Create the visualization
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 12), sharex=True)
+    fig.suptitle(f'LSTM Model Predictions vs S&P 500 Price (Test Set: {test_start_date} onwards)', 
+                 fontsize=16, fontweight='bold')
+    
+    # Plot 1: S&P 500 Price
+    if test_prices is not None:
+        ax1.plot(test_dates, test_prices, color='blue', linewidth=1.5, alpha=0.8)
+        ax1.set_title('S&P 500 Closing Price (Test Set)', fontweight='bold')
+        ax1.set_ylabel('Price ($)', fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        
+        # Add price trend
+        if len(test_prices) > 30:
+            ma_30 = np.convolve(test_prices, np.ones(30)/30, mode='valid')
+            ma_dates = test_dates[29:]
+            ax1.plot(ma_dates, ma_30, color='red', linewidth=2, alpha=0.7, label='30-day MA')
+            ax1.legend()
+    else:
+        ax1.text(0.5, 0.5, 'Price data not available', ha='center', va='center', transform=ax1.transAxes)
+        ax1.set_title('S&P 500 Closing Price (Test Set)', fontweight='bold')
+    
+    # Plot 2: Model Predictions (Probability)
+    ax2.plot(test_dates, predictions, color='green', linewidth=1.5, alpha=0.8)
+    ax2.axhline(y=0.5, color='red', linestyle='--', alpha=0.7, label='Decision Threshold (0.5)')
+    ax2.set_title('LSTM Prediction Probability (14-day forward)', fontweight='bold')
+    ax2.set_ylabel('Probability', fontweight='bold')
+    ax2.set_ylim(0, 1)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    # Plot 3: Predictions vs Actual (Binary)
+    # Convert predictions to binary using 0.5 threshold
+    pred_binary = (predictions >= 0.5).astype(int)
+    actual_binary = y_test_seq
+    
+    # Create scatter plot
+    correct_up = (pred_binary == 1) & (actual_binary == 1)
+    correct_down = (pred_binary == 0) & (actual_binary == 0)
+    wrong_up = (pred_binary == 1) & (actual_binary == 0)
+    wrong_down = (pred_binary == 0) & (actual_binary == 1)
+    
+    if test_prices is not None:
+        ax3.scatter(test_dates[correct_up], test_prices[correct_up], color='green', alpha=0.6, s=20, label='Correct Up Prediction')
+        ax3.scatter(test_dates[correct_down], test_prices[correct_down], color='blue', alpha=0.6, s=20, label='Correct Down Prediction')
+        ax3.scatter(test_dates[wrong_up], test_prices[wrong_up], color='red', alpha=0.6, s=20, label='Wrong Up Prediction')
+        ax3.scatter(test_dates[wrong_down], test_prices[wrong_down], color='orange', alpha=0.6, s=20, label='Wrong Down Prediction')
+    else:
+        ax3.scatter(test_dates[correct_up], np.zeros_like(test_dates[correct_up]), color='green', alpha=0.6, s=20, label='Correct Up Prediction')
+        ax3.scatter(test_dates[correct_down], np.zeros_like(test_dates[correct_down]), color='blue', alpha=0.6, s=20, label='Correct Down Prediction')
+        ax3.scatter(test_dates[wrong_up], np.zeros_like(test_dates[wrong_up]), color='red', alpha=0.6, s=20, label='Wrong Up Prediction')
+        ax3.scatter(test_dates[wrong_down], np.zeros_like(test_dates[wrong_down]), color='orange', alpha=0.6, s=20, label='Wrong Down Prediction')
+    
+    ax3.set_title('Prediction Accuracy vs Price (Test Set)', fontweight='bold')
+    ax3.set_ylabel('Price ($)' if test_prices is not None else 'Index', fontweight='bold')
+    ax3.set_xlabel('Date', fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Calculate and display accuracy metrics
+    accuracy = np.mean(pred_binary == actual_binary)
+    precision = np.sum((pred_binary == 1) & (actual_binary == 1)) / max(np.sum(pred_binary == 1), 1)
+    recall = np.sum((pred_binary == 1) & (actual_binary == 1)) / max(np.sum(actual_binary == 1), 1)
+    f1 = 2 * (precision * recall) / max(precision + recall, 1e-8)
+    
+    # Add text box with metrics
+    metrics_text = f'Test Set Metrics:\nAccuracy: {accuracy:.3f}\nPrecision: {precision:.3f}\nRecall: {recall:.3f}\nF1: {f1:.3f}'
+    ax3.text(0.02, 0.98, metrics_text, transform=ax3.transAxes, fontsize=10,
+             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    # Format x-axis dates
+    if len(test_dates) > 0 and isinstance(test_dates[0], pd.Timestamp):
+        ax3.xaxis.set_major_locator(plt.matplotlib.dates.MonthLocator(interval=3))
+        ax3.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m'))
+        plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45)
+    
+    plt.tight_layout()
+    
+    # Save plot
+    plot_path = os.path.join(models_dir, 'lstm_test_predictions_vs_price.png')
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    print(f"  📈 Test set predictions vs price plot saved to: {plot_path}")
+    plt.show()
+    
+    # Create additional detailed analysis plot for test set
+    fig2, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+    fig2.suptitle(f'LSTM Model Test Set Analysis ({test_start_date} onwards)', fontsize=16, fontweight='bold')
+    
+    # Plot 1: Prediction distribution
+    ax1.hist(predictions, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+    ax1.axvline(x=0.5, color='red', linestyle='--', linewidth=2, label='Decision Threshold')
+    ax1.set_title('Distribution of Prediction Probabilities (Test Set)')
+    ax1.set_xlabel('Prediction Probability')
+    ax1.set_ylabel('Frequency')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Prediction confidence over time
+    confidence = np.abs(predictions - 0.5) * 2  # Convert to 0-1 confidence scale
+    ax2.plot(test_dates, confidence, color='purple', alpha=0.7)
+    ax2.set_title('Model Confidence Over Time (Test Set)')
+    ax2.set_xlabel('Date')
+    ax2.set_ylabel('Confidence (0-1)')
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Rolling accuracy
+    window_size = min(50, len(pred_binary) // 4)  # Adaptive window size
+    if window_size > 10:
+        rolling_accuracy = []
+        rolling_dates = []
+        for i in range(window_size, len(pred_binary)):
+            window_acc = np.mean(pred_binary[i-window_size:i] == actual_binary[i-window_size:i])
+            rolling_accuracy.append(window_acc)
+            rolling_dates.append(test_dates[i])
+        
+        ax3.plot(rolling_dates, rolling_accuracy, color='green', alpha=0.7)
+        ax3.axhline(y=0.5, color='red', linestyle='--', alpha=0.5, label='Random Guess')
+        ax3.set_title(f'Rolling Accuracy ({window_size}-day window)')
+        ax3.set_xlabel('Date')
+        ax3.set_ylabel('Accuracy')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+    else:
+        ax3.text(0.5, 0.5, 'Insufficient data for rolling accuracy', ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title('Rolling Accuracy')
+    
+    # Plot 4: Prediction vs actual correlation
+    ax4.scatter(actual_binary, predictions, alpha=0.5, color='blue')
+    ax4.set_title('Predictions vs Actual Values (Test Set)')
+    ax4.set_xlabel('Actual (0=Down, 1=Up)')
+    ax4.set_ylabel('Predicted Probability')
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Save detailed analysis plot
+    detailed_plot_path = os.path.join(models_dir, 'lstm_test_detailed_analysis.png')
+    plt.savefig(detailed_plot_path, dpi=300, bbox_inches='tight')
+    print(f"  📊 Test set detailed analysis plot saved to: {detailed_plot_path}")
+    plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(description='Train LSTM with time-series CV for S&P 500 target prediction')
     parser.add_argument('--data-csv', type=str, default='data/final_dataset_for_modeling.csv')
@@ -1126,6 +1347,9 @@ def main():
             for metric, value in agg_metrics.items():
                 print(f"    {metric.upper()}: {value:.4f}")
         print(f"{'='*60}")
+    
+    # Generate test set predictions vs price visualization
+    plot_test_predictions_vs_price(model_path, args.data_csv, args.models_dir, args.test_start_date, device, args.verbose)
 
 
 if __name__ == '__main__':
