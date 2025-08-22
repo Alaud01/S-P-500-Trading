@@ -666,6 +666,7 @@ def retrain_full_and_save(X: np.ndarray,
 def plot_training_history(fold_histories: List[Dict[str, List[float]]], 
                         fold_metrics: List[Dict[str, float]], 
                         models_dir: str,
+                        plots_dir: str,
                         verbose: bool = True):
     """Create comprehensive training plots"""
     if not verbose:
@@ -800,8 +801,8 @@ def plot_training_history(fold_histories: List[Dict[str, List[float]]],
     plt.tight_layout()
     
     # Save plot
-    os.makedirs(models_dir, exist_ok=True)
-    plot_path = os.path.join(models_dir, 'lstm_training_plots.png')
+    os.makedirs(plots_dir, exist_ok=True)
+    plot_path = os.path.join(plots_dir, 'lstm_training_plots.png')
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     print(f"  📈 Training plots saved to: {plot_path}")
     plt.show()
@@ -810,6 +811,7 @@ def plot_training_history(fold_histories: List[Dict[str, List[float]]],
 def plot_test_predictions_vs_price(model_path: str, 
                                  data_csv: str,
                                  models_dir: str,
+                                 plots_dir: str,
                                  test_start_date: str,
                                  device: torch.device,
                                  verbose: bool = True):
@@ -965,7 +967,8 @@ def plot_test_predictions_vs_price(model_path: str,
     plt.tight_layout()
     
     # Save plot
-    plot_path = os.path.join(models_dir, 'lstm_test_predictions_vs_price.png')
+    os.makedirs(plots_dir, exist_ok=True)
+    plot_path = os.path.join(plots_dir, 'lstm_test_predictions_vs_price.png')
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     print(f"  📈 Test set predictions vs price plot saved to: {plot_path}")
     plt.show()
@@ -1022,7 +1025,7 @@ def plot_test_predictions_vs_price(model_path: str,
     plt.tight_layout()
     
     # Save detailed analysis plot
-    detailed_plot_path = os.path.join(models_dir, 'lstm_test_detailed_analysis.png')
+    detailed_plot_path = os.path.join(plots_dir, 'lstm_test_detailed_analysis.png')
     plt.savefig(detailed_plot_path, dpi=300, bbox_inches='tight')
     print(f"  📊 Test set detailed analysis plot saved to: {detailed_plot_path}")
     plt.show()
@@ -1031,15 +1034,16 @@ def plot_test_predictions_vs_price(model_path: str,
 def main():
     parser = argparse.ArgumentParser(description='Train LSTM with time-series CV for S&P 500 target prediction')
     parser.add_argument('--data-csv', type=str, default='data/final_dataset_for_modeling.csv')
-    parser.add_argument('--models-dir', type=str, default='models')
+    parser.add_argument('--models-dir', type=str, default='models/lstm')
+    parser.add_argument('--plots-dir', type=str, default='plots/lstm')
     parser.add_argument('--seq-len', type=int, default=60)
     parser.add_argument('--hidden-size', type=int, default=64)
     parser.add_argument('--num-layers', type=int, default=2)
     parser.add_argument('--dropout', type=float, default=0.2)
     parser.add_argument('--batch-size', type=int, default=128)
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=75)
     parser.add_argument('--patience', type=int, default=15)
-    parser.add_argument('--lr', type=float, default=5e-4)
+    parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--weight-decay', type=float, default=1e-5)
     parser.add_argument('--n-splits', type=int, default=5)
     parser.add_argument('--val-window', type=int, default=180)
@@ -1070,6 +1074,7 @@ def main():
         print(f"Random seed: {args.seed}")
         print(f"Data file: {args.data_csv}")
         print(f"Models directory: {args.models_dir}")
+        print(f"Plots directory: {args.plots_dir}")
         print(f"Verbose mode: {args.verbose}")
         print(f"Smoke test: {args.smoke}")
         print()
@@ -1200,7 +1205,7 @@ def main():
             print(f"{'='*60}\n")
             
             # Plot training history
-            plot_training_history(fold_histories, fold_metrics, args.models_dir, args.verbose)
+            plot_training_history(fold_histories, fold_metrics, args.models_dir, args.plots_dir, args.verbose)
         final_params = base_params
 
     # Holdout evaluation from a specific date (default: 2022-01-01)
@@ -1349,7 +1354,7 @@ def main():
         print(f"{'='*60}")
     
     # Generate test set predictions vs price visualization
-    plot_test_predictions_vs_price(model_path, args.data_csv, args.models_dir, args.test_start_date, device, args.verbose)
+    plot_test_predictions_vs_price(model_path, args.data_csv, args.models_dir, args.plots_dir, args.test_start_date, device, args.verbose)
 
 
 if __name__ == '__main__':

@@ -8,7 +8,7 @@
     "batch_size": 128,
     "epochs": 75,
     "patience": 15,
-    "lr": 0.001,
+    "lr": 0.0002,
     "weight_decay": 1e-05,
     "verbose": true,
     "log_every": 1,
@@ -19,8 +19,8 @@
     "min_lr": 1e-06,
     "threshold_metric": "f1"
   },
-  "models_dir": "models",
-  "model_path": "models/lstm_best_20250822_125807.pt",
+  "models_dir": "models/lstm",
+  "model_path": "models/lstm/lstm_best_20250822_144927.pt",
   "dataset_info": {
     "shape": [
       5878,
@@ -77,24 +77,24 @@
     "positive_class_ratio": 0.6241919020074855
   },
   "training_info": {
-    "timestamp": "2025-08-22 12:58:07",
+    "timestamp": "2025-08-22 14:49:27",
     "seed": 42,
     "smoke_test": false
   },
   "cv_metrics": {
-    "auc": 0.4575137411352109,
-    "accuracy": 0.5411111111111111,
-    "balanced_accuracy": 0.48840476045099945,
-    "precision": 0.5949062854674181,
-    "recall": 0.760368818747011,
-    "f1": 0.6309616443339537
+    "auc": 0.5346735504019317,
+    "accuracy": 0.6755555555555556,
+    "balanced_accuracy": 0.548481831757093,
+    "precision": 0.6705691056910569,
+    "recall": 0.9439024390243903,
+    "f1": 0.7779900290213113
   },
   "holdout_metrics_since_2022-01-01": {
-    "auc": 0.5792989214175654,
-    "accuracy": 0.48707482993197276,
-    "balanced_accuracy": 0.5174114021571649,
-    "precision": 0.622568093385214,
-    "recall": 0.36363636363636365,
-    "f1": 0.45911047345767575
+    "auc": 0.6141525423728813,
+    "accuracy": 0.601360544217687,
+    "balanced_accuracy": 0.5709745762711864,
+    "precision": 0.6496945010183299,
+    "recall": 0.725,
+    "f1": 0.6852846401718582
   }
 }

@@ -261,12 +261,17 @@ def create_feature_importance_visualization(rf_importance, interactions):
     axes[1, 1].set_ylabel('Number of Features', fontsize=12)
     
     plt.tight_layout()
-    plt.savefig('plots/visualization/comprehensive_feature_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/comprehensive_feature_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 def main():
     """Main function to run the detailed analysis"""
     print("Starting detailed feature analysis...")
+    
+    # Create plots directory if it doesn't exist
+    import os
+    plots_dir = 'plots/visualization'
+    os.makedirs(plots_dir, exist_ok=True)
     
     # Load data
     df = load_data()

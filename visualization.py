@@ -76,7 +76,7 @@ def analyze_target_distribution(df):
     axes[1, 1].tick_params(axis='x', rotation=45)
     
     plt.tight_layout()
-    plt.savefig('plots/visualization/target_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/target_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 def analyze_feature_correlations(df):
@@ -124,7 +124,7 @@ def analyze_feature_correlations(df):
     axes[1, 1].set_xlabel('Absolute Correlation Coefficient')
     
     plt.tight_layout()
-    plt.savefig('plots/visualization/correlation_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/correlation_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
     
     return correlations
@@ -164,7 +164,7 @@ def analyze_technical_indicators(df):
     axes[1, 1].set_ylabel('Frequency')
     
     plt.tight_layout()
-    plt.savefig('plots/visualization/technical_indicators_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/technical_indicators_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 def analyze_sentiment_and_news(df):
@@ -204,7 +204,7 @@ def analyze_sentiment_and_news(df):
     axes[1, 1].tick_params(axis='x', rotation=45)
     
     plt.tight_layout()
-    plt.savefig('plots/visualization/sentiment_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/sentiment_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 def analyze_economic_indicators(df):
@@ -243,7 +243,7 @@ def analyze_economic_indicators(df):
     axes[1, 1].set_ylabel('Frequency')
     
     plt.tight_layout()
-    plt.savefig('plots/visualization/economic_indicators_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/economic_indicators_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 def perform_feature_selection(df):
@@ -297,7 +297,7 @@ def perform_feature_selection(df):
     axes[1].set_xlabel('F-test Score')
     
     plt.tight_layout()
-    plt.savefig('plots/visualization/feature_selection_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{plots_dir}/feature_selection_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
     
     return mi_df, f_df
@@ -391,8 +391,8 @@ def main():
     
     # Create plots directory and subdirectories if they don't exist
     import os
-    os.makedirs('plots', exist_ok=True)
-    os.makedirs('plots/visualization', exist_ok=True)
+    plots_dir = 'plots/visualization'
+    os.makedirs(plots_dir, exist_ok=True)
     
     # Load data
     df = load_and_prepare_data()

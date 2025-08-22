@@ -685,6 +685,11 @@ def main():
     print("S&P 500 Headlines Sentiment Analysis using FinBERT")
     print("=" * 60)
     
+    # Create plots directory if it doesn't exist
+    import os
+    plots_dir = 'plots/sentiment'
+    os.makedirs(plots_dir, exist_ok=True)
+    
     # Load data
     print("\nLoading dataset...")
     try:
@@ -720,7 +725,7 @@ def main():
     
     # Create visualizations
     print("\nGenerating visualizations...")
-    analyzer.plot_sentiment_analysis(result_df, save_path='plots/sentiment/sentiment_analysis_plots.png')
+    analyzer.plot_sentiment_analysis(result_df, save_path=f'{plots_dir}/sentiment_analysis_plots.png')
     
     # Save results
     print("\nSaving results...")
