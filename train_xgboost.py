@@ -1,3 +1,5 @@
+# run command: python train_xgboost.py --search_trials 25 --use_scaler --calibrate --verbose
+
 import os
 import json
 import math
@@ -27,6 +29,8 @@ except Exception as e:
 
 class _IdentityScaler:
 	def fit(self, X):
+		self.mean_ = np.zeros(X.shape[1])
+		self.scale_ = np.ones(X.shape[1])
 		return self
 	def transform(self, X):
 		return X
@@ -36,7 +40,7 @@ class _IdentityScaler:
 class XGBParams:
 	# Core params
 	n_estimators: int = 800
-	max_depth: int = 6
+	max_depth: int = 4
 	learning_rate: float = 0.03
 	subsample: float = 0.8
 	colsample_bytree: float = 0.8
@@ -63,6 +67,7 @@ class XGBParams:
 	# Early stopping
 	early_stopping_rounds: int = 100
 	test_size_holdout: float = 0.15
+	calibrate: bool = False
 
 
 def set_seed(seed: int = 42) -> None:
@@ -135,27 +140,47 @@ def evaluate(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> 
 	}
 
 
-def find_best_threshold(y_prob: np.ndarray, y_true: np.ndarray, metric: str = 'f1') -> Tuple[float, float]:
-	best_thr = 0.5
+def random_search_xgb(X: np.ndarray,
+					y: np.ndarray,
+					feature_names: List[str],
+					base_params: XGBParams,
+					trials: int,
+					verbose: bool = True) -> Tuple[XGBParams, Dict[str, float]]:
+	"""Randomized hyperparameter search using time-series CV AUC as objective."""
+	param_space = {
+		'n_estimators': [400, 600, 800, 1000, 1200],
+		'learning_rate': [0.005, 0.01, 0.02, 0.03, 0.05],
+		'max_depth': [3, 4, 5, 6, 7, 8, 9],
+		'subsample': [0.6, 0.7, 0.8, 0.9, 1.0],
+		'colsample_bytree': [0.6, 0.7, 0.8, 0.9, 1.0],
+		'min_child_weight': [1, 2, 3, 5, 7],
+		'reg_alpha': [0.0, 0.001, 0.01, 0.1],
+		'reg_lambda': [0.5, 1.0, 2.0, 5.0],
+		'gamma': [0.0, 0.05, 0.1, 0.2],
+	}
+
 	best_score = -1.0
-	for thr in np.linspace(0.05, 0.95, 19):
-		preds = (y_prob >= thr).astype(int)
-		if metric == 'youden':
-			# Youden's J = TPR - FPR
-			tp = np.logical_and(preds == 1, y_true == 1).sum()
-			tn = np.logical_and(preds == 0, y_true == 0).sum()
-			fp = np.logical_and(preds == 1, y_true == 0).sum()
-			fn = np.logical_and(preds == 0, y_true == 1).sum()
-			tpr = tp / max(tp + fn, 1)
-			fpr = fp / max(fp + tn, 1)
-			score = tpr - fpr
-		else:
-			_, _, f1, _ = precision_recall_fscore_support(y_true, preds, average='binary', zero_division=0)
-			score = float(f1)
+	best_cfg: Optional[XGBParams] = None
+	best_metrics: Dict[str, float] = {}
+
+	for t in range(trials):
+		trial = XGBParams(**asdict(base_params))
+		for k, values in param_space.items():
+			setattr(trial, k, np.random.choice(values))
+		if verbose:
+			print(f"\n[Search] Trial {t+1}/{trials}: depth={trial.max_depth}, lr={trial.learning_rate}, n_estimators={trial.n_estimators}, subsample={trial.subsample}, colsample={trial.colsample_bytree}, min_child_weight={trial.min_child_weight}, reg_alpha={trial.reg_alpha}, reg_lambda={trial.reg_lambda}, gamma={trial.gamma}")
+		_, val_metrics, _, _, _, _ = train_xgb_cv(X, y, feature_names, trial, verbose=False)
+		score = val_metrics['auc']
+		if verbose:
+			print(f"  -> CV AUC: {score:.4f}, F1: {val_metrics['f1']:.4f}")
 		if score > best_score:
 			best_score = score
-			best_thr = float(thr)
-	return best_thr, best_score
+			best_cfg = trial
+			best_metrics = val_metrics
+
+	if best_cfg is None:
+		return base_params, {'auc': 0.0, 'f1': 0.0}
+	return best_cfg, best_metrics
 
 
 def train_xgb_cv(X: np.ndarray,
@@ -175,6 +200,10 @@ def train_xgb_cv(X: np.ndarray,
 	best_scaler: Optional[StandardScaler] = None
 	best_threshold = 0.5
 	best_hist: Dict[str, List[float]] = {'val_auc': [], 'val_f1': []}
+	fold_histories = []
+	# Out-of-fold predictions for calibration/thresholding
+	oof_prob = np.full(y.shape[0], np.nan, dtype=np.float32)
+	oof_true = np.full(y.shape[0], np.nan, dtype=np.float32)
 
 	for fold_idx, (train_idx, val_idx) in enumerate(splits, start=1):
 		if verbose:
@@ -189,47 +218,25 @@ def train_xgb_cv(X: np.ndarray,
 
 		scale_pos_weight = compute_scale_pos_weight(y_train)
 
-		model = XGBClassifier(
-			n_estimators=params.n_estimators,
-			max_depth=params.max_depth,
-			learning_rate=params.learning_rate,
-			subsample=params.subsample,
-			colsample_bytree=params.colsample_bytree,
-			min_child_weight=params.min_child_weight,
-			reg_alpha=params.reg_alpha,
-			reg_lambda=params.reg_lambda,
-			gamma=params.gamma,
-			objective='binary:logistic',
-			eval_metric='auc',
-			n_jobs=params.n_jobs,
-			tree_method=params.tree_method,
-			verbosity=params.verbosity,
-			random_state=params.random_state,
-			scale_pos_weight=scale_pos_weight,
-			device=params.device if params.device else None,
-		)
-
-		model.fit(
-			X_train,
-			y_train,
-			eval_set=[(X_val, y_val)],
-			verbose=False
-		)
+		model, _, history = fit_xgb_with_es_compat(X_train, y_train, X_val, y_val, params)
+		fold_histories.append(history)
 
 		val_prob = model.predict_proba(X_val)[:, 1]
-		thr, _ = find_best_threshold(val_prob, y_val, metric='f1')
-		metrics = evaluate(y_val, val_prob, threshold=thr)
+		metrics = evaluate(y_val, val_prob, threshold=0.5)
 		best_hist['val_auc'].append(metrics['auc'])
 		best_hist['val_f1'].append(metrics['f1'])
+		# store OOF
+		oof_prob[val_idx] = val_prob.astype(np.float32)
+		oof_true[val_idx] = y_val.astype(np.float32)
 
 		if verbose:
-			print(f"  Val AUC: {metrics['auc']:.4f} | F1@thr {thr:.2f}: {metrics['f1']:.4f}")
+			print(f"  Val AUC: {metrics['auc']:.4f} | F1@thr {0.5:.2f}: {metrics['f1']:.4f}")
 
 		if metrics['auc'] > best_val_auc:
 			best_val_auc = metrics['auc']
 			best_model = model
 			best_scaler = scaler
-			best_threshold = thr
+			best_threshold = 0.5
 
 	# Final train/val metrics correspond to best fold's val performance
 	train_metrics = {}
@@ -244,9 +251,176 @@ def train_xgb_cv(X: np.ndarray,
 		'scaler_scale': best_scaler.scale_.tolist() if best_scaler is not None else None,
 		'cv_val_auc_mean': float(np.mean(best_hist['val_auc'])),
 		'cv_val_f1_mean': float(np.mean(best_hist['val_f1'])),
+		'cv_val_auc_per_fold': [float(x) for x in best_hist['val_auc']],
+		'cv_val_f1_per_fold': [float(x) for x in best_hist['val_f1']],
+		'oof_prob': [None if np.isnan(v) else float(v) for v in oof_prob.tolist()],
+		'oof_true': [None if np.isnan(v) else int(v) for v in oof_true.tolist()],
+		'fold_histories': fold_histories,
 	}
 
 	return train_metrics, val_metrics, artifacts, best_threshold, best_model, best_scaler
+
+
+def _clone_xgb_with_params(src: XGBClassifier, override: Dict[str, Any] = None) -> XGBClassifier:
+	params = src.get_params()
+	params.update(override or {})
+	return XGBClassifier(**params)
+
+
+class BoosterModelAdapter:
+	def __init__(self, booster: Any, best_ntree_limit: Optional[int] = None):
+		self._booster = booster
+		self.best_ntree_limit = best_ntree_limit
+	def predict_proba(self, X: np.ndarray) -> np.ndarray:
+		dm = xgb.DMatrix(X)
+		limit = self.best_ntree_limit if self.best_ntree_limit is not None else 0
+		if limit <= 0:
+			prob_pos = self._booster.predict(dm)
+		else:
+			try:
+				# For modern xgboost versions (>=1.4.0)
+				prob_pos = self._booster.predict(dm, iteration_range=(0, limit))
+			except TypeError:
+				# For older xgboost versions (<1.4.0)
+				prob_pos = self._booster.predict(dm, ntree_limit=limit)
+
+		prob_pos = np.asarray(prob_pos).reshape(-1)
+		prob_neg = 1.0 - prob_pos
+		return np.column_stack([prob_neg, prob_pos])
+	def save_model(self, path: str) -> None:
+		self._booster.save_model(path)
+	def get_booster(self) -> Any:
+		return self._booster
+
+
+def _build_sklearn_xgb(params: XGBParams, scale_pos_weight: float) -> XGBClassifier:
+	return XGBClassifier(
+		n_estimators=params.n_estimators,
+		max_depth=params.max_depth,
+		learning_rate=params.learning_rate,
+		subsample=params.subsample,
+		colsample_bytree=params.colsample_bytree,
+		min_child_weight=params.min_child_weight,
+		reg_alpha=params.reg_alpha,
+		reg_lambda=params.reg_lambda,
+		gamma=params.gamma,
+		objective='binary:logistic',
+		eval_metric='auc',
+		n_jobs=params.n_jobs,
+		tree_method=params.tree_method,
+		verbosity=params.verbosity,
+		random_state=params.random_state,
+		scale_pos_weight=scale_pos_weight,
+		device=params.device if params.device else None,
+	)
+
+
+def fit_xgb_with_es_compat(X_train: np.ndarray,
+					 y_train: np.ndarray,
+					 X_val: np.ndarray,
+					 y_val: np.ndarray,
+					 params: XGBParams) -> Tuple[Any, Optional[int], Dict]:
+	spw = compute_scale_pos_weight(y_train)
+	evals_result: Dict = {}
+	# Try modern callbacks API
+	try:
+		model = _build_sklearn_xgb(params, spw)
+		model.fit(
+			X_train,
+			y_train,
+			eval_set=[(X_val, y_val)],
+			verbose=False,
+			callbacks=[xgb.callback.EarlyStopping(rounds=params.early_stopping_rounds, metric_name='auc', data_name='validation_0', save_best=True)]
+		)
+		best_it = getattr(model, 'best_iteration', None)
+		if best_it is None:
+			best_it = getattr(model, 'best_ntree_limit', None)
+		return model, best_it, getattr(model, 'evals_result_', {})
+	except TypeError:
+		pass
+	# Try older sklearn API with early_stopping_rounds
+	try:
+		model = _build_sklearn_xgb(params, spw)
+		model.fit(
+			X_train,
+			y_train,
+			eval_set=[(X_val, y_val)],
+			verbose=False,
+			early_stopping_rounds=params.early_stopping_rounds
+		)
+		best_it = getattr(model, 'best_iteration', None)
+		if best_it is None:
+			best_it = getattr(model, 'best_ntree_limit', None)
+		return model, best_it, getattr(model, 'evals_result_', {})
+	except TypeError:
+		pass
+	# Fallback to xgb.train
+	dtrain = xgb.DMatrix(X_train, label=y_train)
+	dval = xgb.DMatrix(X_val, label=y_val)
+	xgb_params = {
+		'max_depth': params.max_depth,
+		'eta': params.learning_rate,
+		'subsample': params.subsample,
+		'colsample_bytree': params.colsample_bytree,
+		'min_child_weight': params.min_child_weight,
+		'alpha': params.reg_alpha,
+		'lambda': params.reg_lambda,
+		'gamma': params.gamma,
+		'objective': 'binary:logistic',
+		'eval_metric': 'auc',
+		'tree_method': params.tree_method,
+		'nthread': params.n_jobs if params.n_jobs is not None else -1,
+		'verbosity': params.verbosity,
+		'scale_pos_weight': spw,
+	}
+	booster = xgb.train(
+		params=xgb_params,
+		dtrain=dtrain,
+		num_boost_round=params.n_estimators,
+		evals=[(dval, 'validation_0')],
+		early_stopping_rounds=params.early_stopping_rounds,
+		verbose_eval=False,
+		evals_result=evals_result,
+	)
+	best_ntree = getattr(booster, 'best_ntree_limit', None)
+	return BoosterModelAdapter(booster, best_ntree), best_ntree, evals_result
+
+
+def fit_xgb_no_es(X: np.ndarray, y: np.ndarray, params: XGBParams, n_estimators: int) -> Any:
+	spw = compute_scale_pos_weight(y)
+	# Try sklearn wrapper
+	try:
+		model = _build_sklearn_xgb(params, spw)
+		model.set_params(n_estimators=int(n_estimators))
+		model.fit(X, y, verbose=False)
+		return model
+	except TypeError:
+		pass
+	# Fallback to xgb.train
+	dtrain = xgb.DMatrix(X, label=y)
+	xgb_params = {
+		'max_depth': params.max_depth,
+		'eta': params.learning_rate,
+		'subsample': params.subsample,
+		'colsample_bytree': params.colsample_bytree,
+		'min_child_weight': params.min_child_weight,
+		'alpha': params.reg_alpha,
+		'lambda': params.reg_lambda,
+		'gamma': params.gamma,
+		'objective': 'binary:logistic',
+		'eval_metric': 'auc',
+		'tree_method': params.tree_method,
+		'nthread': params.n_jobs if params.n_jobs is not None else -1,
+		'verbosity': params.verbosity,
+		'scale_pos_weight': spw,
+	}
+	booster = xgb.train(
+		params=xgb_params,
+		dtrain=dtrain,
+		num_boost_round=int(n_estimators),
+		verbose_eval=False
+	)
+	return BoosterModelAdapter(booster, int(n_estimators))
 
 
 def feature_importance_plot(model: XGBClassifier, feature_names: List[str], out_path: str) -> None:
@@ -279,11 +453,12 @@ def feature_importance_plot(model: XGBClassifier, feature_names: List[str], out_
 
 
 def plot_test_predictions_vs_price(model: XGBClassifier,
-								scaler: StandardScaler,
-								data_csv: str,
-								plots_dir: str,
-								test_start_date: str,
-								verbose: bool = True) -> None:
+							scaler: StandardScaler,
+							data_csv: str,
+							plots_dir: str,
+							test_start_date: str,
+							threshold: float = 0.5,
+							verbose: bool = True) -> None:
 	"""
 	Create a plot showing XGBoost model predictions vs S&P 500 price for the test set (2022 onwards).
 	"""
@@ -349,7 +524,7 @@ def plot_test_predictions_vs_price(model: XGBClassifier,
 	
 	# Plot 2: Model Predictions (Probability)
 	ax2.plot(test_dates, predictions, color='green', linewidth=1.5, alpha=0.8)
-	ax2.axhline(y=0.5, color='red', linestyle='--', alpha=0.7, label='Decision Threshold (0.5)')
+	ax2.axhline(y=threshold, color='red', linestyle='--', alpha=0.7, label=f'Decision Threshold ({threshold:.2f})')
 	ax2.set_title('XGBoost Prediction Probability (14-day forward)', fontweight='bold')
 	ax2.set_ylabel('Probability', fontweight='bold')
 	ax2.set_ylim(0, 1)
@@ -357,8 +532,8 @@ def plot_test_predictions_vs_price(model: XGBClassifier,
 	ax2.legend()
 	
 	# Plot 3: Predictions vs Actual (Binary)
-	# Convert predictions to binary using 0.5 threshold
-	pred_binary = (predictions >= 0.5).astype(int)
+	# Convert predictions to binary using selected threshold
+	pred_binary = (predictions >= threshold).astype(int)
 	actual_binary = y_test
 	
 	# Create scatter plot
@@ -416,7 +591,7 @@ def plot_test_predictions_vs_price(model: XGBClassifier,
 	
 	# Plot 1: Prediction distribution
 	ax1.hist(predictions, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
-	ax1.axvline(x=0.5, color='red', linestyle='--', linewidth=2, label='Decision Threshold')
+	ax1.axvline(x=threshold, color='red', linestyle='--', linewidth=2, label='Decision Threshold')
 	ax1.set_title('Distribution of Prediction Probabilities (Test Set)')
 	ax1.set_xlabel('Prediction Probability')
 	ax1.set_ylabel('Frequency')
@@ -424,7 +599,7 @@ def plot_test_predictions_vs_price(model: XGBClassifier,
 	ax1.grid(True, alpha=0.3)
 	
 	# Plot 2: Prediction confidence over time
-	confidence = np.abs(predictions - 0.5) * 2  # Convert to 0-1 confidence scale
+	confidence = np.abs(predictions - threshold) * 2  # Convert to 0-1 confidence scale
 	ax2.plot(test_dates, confidence, color='purple', alpha=0.7)
 	ax2.set_title('Model Confidence Over Time (Test Set)')
 	ax2.set_xlabel('Date')
@@ -468,9 +643,78 @@ def plot_test_predictions_vs_price(model: XGBClassifier,
 	plt.show()
 
 
+def plot_training_history_xgb(fold_histories: List[Dict],
+							val_metrics: List[Dict[str, float]],
+							plots_dir: str,
+							verbose: bool = True):
+	if not verbose or not fold_histories:
+		return
+	print("  📊 Generating training history plots...")
+	
+	fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+	fig.suptitle('XGBoost Training History - Cross-Validation', fontsize=16, fontweight='bold')
+	
+	# Plot 1: AUC over boosting rounds
+	for i, history in enumerate(fold_histories):
+		if 'validation_0' in history and 'auc' in history['validation_0']:
+			rounds = len(history['validation_0']['auc'])
+			axes[0].plot(range(rounds), history['validation_0']['auc'], label=f'Fold {i+1} Val AUC', alpha=0.8)
+	axes[0].set_title('Validation AUC vs Boosting Rounds')
+	axes[0].set_xlabel('Boosting Round')
+	axes[0].set_ylabel('AUC')
+	axes[0].legend()
+	axes[0].grid(True, alpha=0.3)
+
+	# Plot 2: Final CV metrics
+	metrics_names = list(val_metrics[0].keys())
+	avg_metrics = [np.mean([m[k] for m in val_metrics]) for k in metrics_names]
+	bars = axes[1].bar(metrics_names, avg_metrics, alpha=0.7, color='skyblue', edgecolor='navy')
+	axes[1].set_title('Average CV Metrics')
+	axes[1].set_ylabel('Score')
+	axes[1].tick_params(axis='x', rotation=45)
+	axes[1].grid(True, alpha=0.3, axis='y')
+	for bar, value in zip(bars, avg_metrics):
+		axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+					   f'{value:.3f}', ha='center', va='bottom', fontweight='bold')
+
+	# Plot 3: Individual fold performance
+	fold_aucs = [m['auc'] for m in val_metrics]
+	fold_f1s = [m['f1'] for m in val_metrics]
+	fold_numbers = list(range(1, len(val_metrics) + 1))
+	x = np.arange(len(fold_numbers))
+	width = 0.35
+	bars1 = axes[2].bar(x - width/2, fold_aucs, width, label='AUC', alpha=0.7, color='lightcoral')
+	bars2 = axes[2].bar(x + width/2, fold_f1s, width, label='F1', alpha=0.7, color='lightgreen')
+	axes[2].set_title('Individual Fold Performance')
+	axes[2].set_xlabel('Fold')
+	axes[2].set_ylabel('Score')
+	axes[2].set_xticks(x)
+	axes[2].set_xticklabels(fold_numbers)
+	axes[2].legend()
+	axes[2].grid(True, alpha=0.3, axis='y')
+
+	plt.tight_layout()
+	plot_path = os.path.join(plots_dir, 'xgb_training_history.png')
+	plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+	print(f"  📈 Training history plot saved to: {plot_path}")
+	plt.show()
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """ Special json encoder for numpy types """
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
+
 def save_json(obj: Dict[str, Any], path: str) -> None:
 	with open(path, 'w') as f:
-		json.dump(obj, f, indent=2)
+		json.dump(obj, f, indent=2, cls=NumpyEncoder)
 
 
 def ensure_dirs(*paths: str) -> None:
@@ -489,6 +733,7 @@ def main() -> None:
 	parser.add_argument('--search_trials', type=int, default=0, help='Randomized hyperparameter search trials (0=disabled)')
 	parser.add_argument('--seed', type=int, default=42)
 	parser.add_argument('--verbose', action='store_true')
+	parser.add_argument('--calibrate', action='store_true', help='Enable Platt scaling using OOF predictions')
 	args = parser.parse_args()
 
 	set_seed(args.seed)
@@ -497,15 +742,23 @@ def main() -> None:
 	df = load_dataset(args.data)
 	X_df, y, feature_names = select_features_and_target(df)
 	X = X_df.values.astype(np.float32)
-
+	
 	params = XGBParams()
 	params.device = args.device
 	params.use_scaler = bool(args.use_scaler)
+	params.calibrate = bool(args.calibrate)
 
 	if args.verbose:
 		print(f"Rows: {X.shape[0]}, Features: {X.shape[1]}")
+	
+	# Optional randomized search to improve base hyperparameters (time-series aware)
+	if args.search_trials and args.search_trials > 0:
+		best_cfg, best_metrics = random_search_xgb(X, y, feature_names, params, trials=args.search_trials, verbose=args.verbose)
+		if args.verbose:
+			print(f"Best search CV AUC={best_metrics.get('auc', float('nan')):.4f}, F1={best_metrics.get('f1', float('nan')):.4f}")
+		params = best_cfg
 
-	train_metrics, val_metrics, artifacts, best_thr, best_model, best_scaler = train_xgb_cv(
+	train_metrics, val_metrics, artifacts, best_thr_cv, best_model_cv, best_scaler_cv = train_xgb_cv(
 		X=X,
 		y=y,
 		feature_names=feature_names,
@@ -513,7 +766,24 @@ def main() -> None:
 		verbose=args.verbose
 	)
 
-	# Holdout backtest on last window after final CV split
+	# Derive OOF predictions for robust threshold selection and optional calibration
+	oof_prob_list = artifacts.get('oof_prob', [])
+	oof_true_list = artifacts.get('oof_true', [])
+	oof_mask = [p is not None and t is not None for p, t in zip(oof_prob_list, oof_true_list)]
+
+	chosen_thr = 0.5
+
+	calibrator = None
+	if params.calibrate and any(oof_mask):
+		# Platt scaling: logistic regression on OOF probabilities
+		oof_prob = np.array([oof_prob_list[i] for i in range(len(oof_prob_list)) if oof_mask[i]], dtype=np.float32)
+		oof_true = np.array([oof_true_list[i] for i in range(len(oof_true_list)) if oof_mask[i]], dtype=int)
+		calibrator = LogisticRegression(max_iter=1000)
+		calibrator.fit(oof_prob.reshape(-1, 1), oof_true)
+		if args.verbose:
+			print("Calibration enabled: Platt scaling fitted on OOF predictions.")
+
+	# Build splits once for pre-holdout training and holdout selection
 	splits = time_series_cv_indices(
 		n_rows=X.shape[0],
 		n_splits=params.cv_splits,
@@ -521,27 +791,56 @@ def main() -> None:
 		gap=params.gap,
 		min_train_window=params.min_train_window
 	)
-	last_train_end = splits[-1][0][-1] + 1
-	last_val_end = splits[-1][1][-1] + 1
+	last_train_idx, last_val_idx = splits[-1]
+	last_train_end = last_train_idx[-1] + 1
+	last_val_end = last_val_idx[-1] + 1
 	holdout_start = last_val_end + params.gap
 	holdout_idx = np.arange(holdout_start, X.shape[0]) if holdout_start < X.shape[0] else np.array([], dtype=int)
 
+	# Train final model on all pre-holdout data using early stopping window from the last CV fold
+	final_model = None
+	final_scaler = None
+	best_n_estimators = None
+	if last_val_idx.size > 0:
+		# Scale using only pre-holdout data up to the start of the ES validation set
+		scaler = StandardScaler() if params.use_scaler else _IdentityScaler()
+		scaler.fit(X[last_train_idx])
+		X_train_es = scaler.transform(X[last_train_idx])
+		X_val_es = scaler.transform(X[last_val_idx])
+		y_train_es = y[last_train_idx]
+		y_val_es = y[last_val_idx]
+
+		_, best_n, _ = fit_xgb_with_es_compat(X_train_es, y_train_es, X_val_es, y_val_es, params)
+		if best_n is None:
+			best_n = params.n_estimators
+		# Refit on full pre-holdout data using the best number of trees
+		full_idx = np.concatenate([last_train_idx, last_val_idx])
+		full_idx = np.unique(full_idx)
+		# The scaler was already fit on the training portion, so we just transform the full pre-holdout data
+		X_full = scaler.transform(X[full_idx])
+		y_full = y[full_idx]
+		model_final = fit_xgb_no_es(X_full, y_full, params, n_estimators=int(best_n))
+		if args.verbose:
+			print(f"Final model trained with n_estimators={int(best_n)} on pre-holdout data size={len(full_idx)}")
+		final_model = model_final
+		final_scaler = scaler
+		best_n_estimators = int(best_n)
+
+	# Holdout backtest using the final pre-holdout model
 	holdout_metrics: Dict[str, float] = {}
 	preds_df: Optional[pd.DataFrame] = None
-	if holdout_idx.size > 0 and best_model is not None:
-		# Fit scaler on all data up to holdout start
-		scaler = StandardScaler()
-		scaler.fit(X[:holdout_start])
-		X_holdout = scaler.transform(X[holdout_idx])
+	if holdout_idx.size > 0 and final_model is not None and final_scaler is not None:
+		X_holdout = final_scaler.transform(X[holdout_idx])
 		y_holdout = y[holdout_idx]
-		y_prob_holdout = best_model.predict_proba(X_holdout)[:, 1]
-		thr_holdout, _ = find_best_threshold(y_prob_holdout, y_holdout, metric='f1')
-		holdout_metrics = evaluate(y_holdout, y_prob_holdout, threshold=thr_holdout)
+		y_prob_holdout = final_model.predict_proba(X_holdout)[:, 1]
+		if calibrator is not None:
+			y_prob_holdout = calibrator.predict_proba(y_prob_holdout.reshape(-1, 1))[:, 1]
+		holdout_metrics = evaluate(y_holdout, y_prob_holdout, threshold=chosen_thr)
 
 		preds_df = pd.DataFrame({
 			'Date': df['Date'].iloc[holdout_idx].values if 'Date' in df.columns else holdout_idx,
 			'prob': y_prob_holdout,
-			'pred': (y_prob_holdout >= thr_holdout).astype(int),
+			'pred': (y_prob_holdout >= chosen_thr).astype(int),
 			'target': y_holdout,
 		})
 
@@ -549,25 +848,39 @@ def main() -> None:
 	model_tag = f"xgb_best"
 	report = {
 		'cv': val_metrics,
-		'best_threshold_cv': best_thr,
+		'best_threshold_cv': best_thr_cv,
+		'oof_threshold': chosen_thr,
 		'holdout': holdout_metrics,
 		'params': asdict(params),
 		'feature_names': feature_names,
+		'best_n_estimators_pre_holdout': int(best_n_estimators) if best_n_estimators is not None else None,
+		'calibration': {
+			'enabled': bool(calibrator is not None),
+			'coef': calibrator.coef_.ravel().tolist() if calibrator is not None else None,
+			'intercept': calibrator.intercept_.ravel().tolist() if calibrator is not None else None,
+		},
 	}
 	save_json(report, os.path.join(args.models_dir, f"{model_tag}_report.json"))
 
-	if best_model is not None:
-		# Save model via JSON dump (portable); user can also pickle if desired
-		best_model.save_model(os.path.join(args.models_dir, f"{model_tag}.json"))
-		feature_importance_plot(best_model, feature_names, os.path.join(args.plots_dir, 'xgb_feature_importance.png'))
-		
-		# Generate test set predictions vs price visualization
+	# Generate training history plots
+	fold_histories = artifacts.get('fold_histories', [])
+	cv_auc_per_fold = artifacts.get('cv_val_auc_per_fold', [])
+	cv_f1_per_fold = artifacts.get('cv_val_f1_per_fold', [])
+	if cv_auc_per_fold and cv_f1_per_fold:
+		fold_metrics_for_plot = [{'auc': a, 'f1': f} for a, f in zip(cv_auc_per_fold, cv_f1_per_fold)]
+		plot_training_history_xgb(fold_histories, fold_metrics_for_plot, args.plots_dir, args.verbose)
+
+	# Save model and plots using the final model (not a CV fold model)
+	if final_model is not None:
+		final_model.save_model(os.path.join(args.models_dir, f"{model_tag}.json"))
+		feature_importance_plot(final_model, feature_names, os.path.join(args.plots_dir, 'xgb_feature_importance.png'))
 		plot_test_predictions_vs_price(
-			model=best_model,
-			scaler=best_scaler,
+			model=final_model,
+			scaler=final_scaler,
 			data_csv=args.data,
 			plots_dir=args.plots_dir,
 			test_start_date=args.test_start_date,
+			threshold=chosen_thr,
 			verbose=args.verbose
 		)
 

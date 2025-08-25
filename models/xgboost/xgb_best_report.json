@@ -1,24 +1,25 @@
 {
   "cv": {
-    "auc": 0.5274413387459967,
-    "f1": 0.7220563948314934
+    "auc": 0.5521412625183094,
+    "f1": 0.5245343179517852
   },
-  "best_threshold_cv": 0.05,
+  "best_threshold_cv": 0.5,
+  "oof_threshold": 0.5,
   "holdout": {
-    "auc": 0.4912819151243197,
-    "accuracy": 0.6275987525987526,
-    "balanced_accuracy": 0.49881107699954164,
-    "precision": 0.6392422192151556,
-    "recall": 0.9593826157595451,
-    "f1": 0.7672567808997889
+    "auc": 0.4757040053546958,
+    "accuracy": 0.6398128898128899,
+    "balanced_accuracy": 0.5,
+    "precision": 0.6398128898128899,
+    "recall": 1.0,
+    "f1": 0.7803486529318542
   },
   "params": {
     "n_estimators": 800,
-    "max_depth": 6,
-    "learning_rate": 0.03,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_weight": 1.0,
+    "max_depth": 8,
+    "learning_rate": 0.02,
+    "subsample": 0.9,
+    "colsample_bytree": 0.7,
+    "min_child_weight": 2,
     "reg_alpha": 0.0,
     "reg_lambda": 1.0,
     "gamma": 0.0,
@@ -34,7 +35,8 @@
     "min_train_window": 750,
     "use_scaler": true,
     "early_stopping_rounds": 100,
-    "test_size_holdout": 0.15
+    "test_size_holdout": 0.15,
+    "calibrate": true
   },
   "feature_names": [
     "Open",
@@ -78,5 +80,15 @@
     "Close_Lag_14",
     "Volume_Lag_14",
     "Sentiment_Lag_14"
-  ]
+  ],
+  "best_n_estimators_pre_holdout": 800,
+  "calibration": {
+    "enabled": true,
+    "coef": [
+      -0.03399248252866388
+    ],
+    "intercept": [
+      0.5453700132392867
+    ]
+  }
 }
