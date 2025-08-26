@@ -65,13 +65,17 @@ class HeadlinesUpdater:
                 
                 # Check if published_date column exists
                 if 'published_date' in df.columns:
-                    df['published_date'] = pd.to_datetime(df['published_date'])
-                    file_latest = df['published_date'].max()
-                    
-                    if latest_date is None or file_latest > latest_date:
-                        latest_date = file_latest
-                    
-                    logger.info(f"Latest date in {os.path.basename(file_path)}: {file_latest}")
+                    try:
+                        df['published_date'] = pd.to_datetime(df['published_date'], utc=True)
+                        file_latest = df['published_date'].max()
+                        
+                        if latest_date is None or file_latest > latest_date:
+                            latest_date = file_latest
+                        
+                        logger.info(f"Latest date in {os.path.basename(file_path)}: {file_latest}")
+                    except Exception as e:
+                        logger.error(f"Error parsing dates in {file_path}: {e}")
+                        continue
                 
             except Exception as e:
                 logger.error(f"Error reading {file_path}: {e}")
@@ -137,9 +141,9 @@ class HeadlinesUpdater:
         return new_headlines
     
     def save_new_headlines(self, new_headlines: Dict[str, pd.DataFrame], 
-                          output_dir: str = "data") -> str:
+                        output_dir: str = "data") -> str:
         """
-        Save new headlines to separate CSV files for each API source.
+        Append new headlines to the existing recent_headlines.csv file.
         
         Args:
             new_headlines (Dict[str, pd.DataFrame]): New headlines from APIs
@@ -151,22 +155,77 @@ class HeadlinesUpdater:
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
         
-        saved_files = []
+        existing_file = os.path.join(output_dir, "recent_headlines.csv")
+        
+        # Define the standard columns to match existing file
+        standard_columns = [
+            'headline', 'summary', 'content', 'url', 'image_url', 
+            'published_date', 'source_name', 'market', 'data_source',
+            'Title', 'Date', 'CP', 'author'
+        ]
+        
+        all_new_data = []
         
         for source, df in new_headlines.items():
             if not df.empty:
-                # Generate filename with timestamp
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"recent_headlines_{timestamp}.csv"
-                filepath = os.path.join(output_dir, filename)
+                # Map the new data to match existing columns
+                mapped_df = pd.DataFrame()
                 
-                # Save to CSV
-                df.to_csv(filepath, index=False, encoding='utf-8')
-                logger.info(f"Saved {len(df)} new articles from {source} to {filepath}")
-                saved_files.append(filepath)
+                # Map columns from new data to standard format
+                mapped_df['headline'] = df.get('title', '')
+                mapped_df['summary'] = df.get('description', '')
+                mapped_df['content'] = df.get('content', '')
+                mapped_df['url'] = df.get('url', '')
+                mapped_df['image_url'] = ''  # Not available from APIs
+                mapped_df['published_date'] = df.get('published_date', '')
+                mapped_df['source_name'] = df.get('source', '')
+                mapped_df['market'] = 'SP500'  # Default market
+                mapped_df['data_source'] = source
+                mapped_df['Title'] = df.get('title', '')  # Duplicate for compatibility
+                mapped_df['Date'] = df.get('published_date', '')
+                mapped_df['CP'] = ''  # Not available
+                mapped_df['author'] = ''  # Not available
+                
+                all_new_data.append(mapped_df)
         
-        if saved_files:
-            return saved_files[0]  # Return first file path
+        if all_new_data:
+            # Combine all new data
+            combined_df = pd.concat(all_new_data, ignore_index=True)
+            
+            # Remove duplicates based on title and url
+            combined_df = combined_df.drop_duplicates(subset=['headline', 'url'])
+            
+            # Check if existing file exists and read it
+            if os.path.exists(existing_file):
+                try:
+                    existing_df = pd.read_csv(existing_file)
+                    logger.info(f"Found existing file with {len(existing_df)} articles")
+                    
+                    # Remove duplicates that already exist in the file
+                    combined_df = combined_df[~combined_df['headline'].isin(existing_df['headline'])]
+                    combined_df = combined_df[~combined_df['url'].isin(existing_df['url'])]
+                    
+                    if not combined_df.empty:
+                        # Append new data to existing file
+                        final_df = pd.concat([existing_df, combined_df], ignore_index=True)
+                        final_df.to_csv(existing_file, index=False, encoding='utf-8')
+                        logger.info(f"Appended {len(combined_df)} new articles to {existing_file}")
+                        logger.info(f"Total articles in file: {len(final_df)}")
+                    else:
+                        logger.info("No new unique articles to add")
+                        return existing_file
+                        
+                except Exception as e:
+                    logger.error(f"Error reading existing file: {e}")
+                    # If error reading existing file, just save new data
+                    combined_df.to_csv(existing_file, index=False, encoding='utf-8')
+                    logger.info(f"Created new file with {len(combined_df)} articles")
+            else:
+                # Create new file if it doesn't exist
+                combined_df.to_csv(existing_file, index=False, encoding='utf-8')
+                logger.info(f"Created new file with {len(combined_df)} articles")
+            
+            return existing_file
         else:
             logger.warning("No new headlines to save")
             return None
@@ -188,8 +247,15 @@ class HeadlinesUpdater:
             start_date = datetime.now() - timedelta(days=30)
             logger.info("No existing data found. Fetching last 30 days of headlines.")
         else:
-            # Add 1 day to avoid duplicates
+            # Add 1 day to avoid duplicates, but ensure we don't go into the future
+            # Convert to timezone-naive datetime for comparison
+            if latest_date.tzinfo is not None:
+                latest_date = latest_date.replace(tzinfo=None)
+            
             start_date = latest_date + timedelta(days=1)
+            now = datetime.now()
+            if start_date > now:
+                start_date = now - timedelta(days=1)
             logger.info(f"Fetching headlines after {start_date}")
         
         # Fetch new headlines
