@@ -1,28 +1,28 @@
 {
   "cv": {
-    "auc": 0.5521412625183094,
-    "f1": 0.5245343179517852
+    "auc": 0.5755588737469645,
+    "f1": 0.4605796555606557
   },
   "best_threshold_cv": 0.5,
   "oof_threshold": 0.5,
   "holdout": {
-    "auc": 0.4757040053546958,
-    "accuracy": 0.6398128898128899,
+    "auc": 0.527100661355442,
+    "accuracy": 0.6485165794066318,
     "balanced_accuracy": 0.5,
-    "precision": 0.6398128898128899,
+    "precision": 0.6485165794066318,
     "recall": 1.0,
-    "f1": 0.7803486529318542
+    "f1": 0.7867880584374338
   },
   "params": {
     "n_estimators": 800,
-    "max_depth": 8,
-    "learning_rate": 0.02,
-    "subsample": 0.9,
-    "colsample_bytree": 0.7,
-    "min_child_weight": 2,
-    "reg_alpha": 0.0,
-    "reg_lambda": 1.0,
-    "gamma": 0.0,
+    "max_depth": 4,
+    "learning_rate": 0.03,
+    "subsample": 0.8,
+    "colsample_bytree": 0.6,
+    "min_child_weight": 5.0,
+    "reg_alpha": 2.0,
+    "reg_lambda": 8.0,
+    "gamma": 2.0,
     "n_jobs": -1,
     "tree_method": "hist",
     "device": null,
@@ -31,12 +31,14 @@
     "seq_len": 1,
     "cv_splits": 5,
     "val_window": 250,
-    "gap": 5,
+    "gap": 14,
     "min_train_window": 750,
     "use_scaler": true,
+    "time_decay_half_life": 500,
+    "time_decay_min_weight": 0.1,
     "early_stopping_rounds": 100,
     "test_size_holdout": 0.15,
-    "calibrate": true
+    "calibrate": false
   },
   "feature_names": [
     "Open",
@@ -83,12 +85,8 @@
   ],
   "best_n_estimators_pre_holdout": 800,
   "calibration": {
-    "enabled": true,
-    "coef": [
-      -0.03399248252866388
-    ],
-    "intercept": [
-      0.5453700132392867
-    ]
+    "enabled": false,
+    "coef": null,
+    "intercept": null
   }
 }

@@ -1,4 +1,4 @@
-# run command: python train_xgboost.py --search_trials 25 --use_scaler --calibrate --verbose
+# run command: python train_xgboost.py --use_scaler --target_cleanup --target_horizon 14 --target_band 0.005 --verbose
 
 import os
 import json
@@ -43,11 +43,11 @@ class XGBParams:
 	max_depth: int = 4
 	learning_rate: float = 0.03
 	subsample: float = 0.8
-	colsample_bytree: float = 0.8
-	min_child_weight: float = 1.0
-	reg_alpha: float = 0.0
-	reg_lambda: float = 1.0
-	gamma: float = 0.0
+	colsample_bytree: float = 0.6
+	min_child_weight: float = 5.0
+	reg_alpha: float = 2.0
+	reg_lambda: float = 8.0
+	gamma: float = 2.0
 
 	# Training params
 	n_jobs: int = -1
@@ -63,6 +63,10 @@ class XGBParams:
 	gap: int = 5
 	min_train_window: int = 750
 	use_scaler: bool = True
+
+	# Time-decay weighting (to reduce overfitting to old regimes)
+	time_decay_half_life: Optional[int] = None  # in days/rows; None disables
+	time_decay_min_weight: float = 0.05  # floor weight for the oldest samples
 
 	# Early stopping
 	early_stopping_rounds: int = 100
@@ -82,12 +86,52 @@ def load_dataset(csv_path: str) -> pd.DataFrame:
 	return df.fillna(method='ffill').fillna(method='bfill')
 
 
+def apply_target_cleanup(df: pd.DataFrame,
+						horizon: int = 14,
+						band: float = 0.005,
+						drop_ambiguous: bool = True) -> pd.DataFrame:
+	"""
+	Create a cleaner binary target for a forward horizon using a neutral band.
+
+	- Computes forward cumulative return over `horizon` days: (Close[t+h]/Close[t]) - 1
+	- Sets `Target` = 1 if return > band, 0 if return < -band
+	- If `drop_ambiguous` is True, drops rows with |return| <= band
+	- Adds a helper column `FwdRet_{horizon}` for analysis (removed from features later)
+	"""
+	if 'Close' not in df.columns:
+		raise ValueError("Column 'Close' is required in the dataset to compute forward returns.")
+
+	working = df.copy()
+	ret_col = f'FwdRet_{int(horizon)}'
+	future_close = working['Close'].shift(-int(horizon))
+	working[ret_col] = (future_close / working['Close']) - 1.0
+
+	# Build target by sign with a neutral band
+	pos_mask = working[ret_col] > float(band)
+	neg_mask = working[ret_col] < -float(band)
+	keep_mask = pos_mask | neg_mask
+
+	if drop_ambiguous:
+		working = working.loc[keep_mask].copy()
+		working['Target'] = (working[ret_col] > 0).astype(int)
+	else:
+		# Keep ambiguous rows; label by sign only (can add a third class later if needed)
+		working['Target'] = (working[ret_col] > 0).astype(int)
+
+	# Drop tail rows where future price is NaN due to shifting
+	working = working.dropna(subset=[ret_col]).reset_index(drop=True)
+	return working
+
+
 def select_features_and_target(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, List[str]]:
 	feature_df = df.select_dtypes(include=[np.number]).copy()
 	if 'Target' not in feature_df.columns:
 		raise ValueError("Target column 'Target' not found in dataset. Run built_dataset.py first.")
+	# Ensure no leakage features from target construction are included
+	leak_cols = [c for c in feature_df.columns if c == 'Future_Close' or c.startswith('FwdRet_')]
+	cols_to_drop = ['Target'] + leak_cols
 	y = feature_df['Target'].astype(int).values
-	X = feature_df.drop(columns=['Target'])
+	X = feature_df.drop(columns=cols_to_drop, errors='ignore')
 	return X, y, list(X.columns)
 
 
@@ -218,7 +262,7 @@ def train_xgb_cv(X: np.ndarray,
 
 		scale_pos_weight = compute_scale_pos_weight(y_train)
 
-		model, _, history = fit_xgb_with_es_compat(X_train, y_train, X_val, y_val, params)
+		model, _, history = fit_xgb_with_es_compat(X_train, y_train, X_val, y_val, params, train_row_indices=train_idx)
 		fold_histories.append(history)
 
 		val_prob = model.predict_proba(X_val)[:, 1]
@@ -316,12 +360,24 @@ def _build_sklearn_xgb(params: XGBParams, scale_pos_weight: float) -> XGBClassif
 
 
 def fit_xgb_with_es_compat(X_train: np.ndarray,
-					 y_train: np.ndarray,
-					 X_val: np.ndarray,
-					 y_val: np.ndarray,
-					 params: XGBParams) -> Tuple[Any, Optional[int], Dict]:
+					y_train: np.ndarray,
+					X_val: np.ndarray,
+					y_val: np.ndarray,
+					params: XGBParams,
+					train_row_indices: Optional[np.ndarray] = None) -> Tuple[Any, Optional[int], Dict]:
 	spw = compute_scale_pos_weight(y_train)
 	evals_result: Dict = {}
+
+	# Optional time-decay sample weights for training set
+	train_sample_weight = None
+	if params.time_decay_half_life is not None and train_row_indices is not None and len(train_row_indices) == len(y_train):
+		# Newer rows get weight closer to 1, older rows approach time_decay_min_weight
+		# Weight formula: w(i) = max(min_weight, 0.5 ** ((age_in_rows) / half_life))
+		# where age_in_rows = (max_index - row_index)
+		max_idx = int(train_row_indices.max())
+		age = (max_idx - train_row_indices).astype(float)
+		decay = np.power(0.5, age / float(max(1, params.time_decay_half_life)))
+		train_sample_weight = np.clip(decay, float(params.time_decay_min_weight), 1.0)
 	# Try modern callbacks API
 	try:
 		model = _build_sklearn_xgb(params, spw)
@@ -330,6 +386,7 @@ def fit_xgb_with_es_compat(X_train: np.ndarray,
 			y_train,
 			eval_set=[(X_val, y_val)],
 			verbose=False,
+			sample_weight=train_sample_weight,
 			callbacks=[xgb.callback.EarlyStopping(rounds=params.early_stopping_rounds, metric_name='auc', data_name='validation_0', save_best=True)]
 		)
 		best_it = getattr(model, 'best_iteration', None)
@@ -346,6 +403,7 @@ def fit_xgb_with_es_compat(X_train: np.ndarray,
 			y_train,
 			eval_set=[(X_val, y_val)],
 			verbose=False,
+			sample_weight=train_sample_weight,
 			early_stopping_rounds=params.early_stopping_rounds
 		)
 		best_it = getattr(model, 'best_iteration', None)
@@ -355,7 +413,7 @@ def fit_xgb_with_es_compat(X_train: np.ndarray,
 	except TypeError:
 		pass
 	# Fallback to xgb.train
-	dtrain = xgb.DMatrix(X_train, label=y_train)
+	dtrain = xgb.DMatrix(X_train, label=y_train, weight=train_sample_weight)
 	dval = xgb.DMatrix(X_val, label=y_val)
 	xgb_params = {
 		'max_depth': params.max_depth,
@@ -386,18 +444,32 @@ def fit_xgb_with_es_compat(X_train: np.ndarray,
 	return BoosterModelAdapter(booster, best_ntree), best_ntree, evals_result
 
 
-def fit_xgb_no_es(X: np.ndarray, y: np.ndarray, params: XGBParams, n_estimators: int) -> Any:
+def fit_xgb_no_es(X: np.ndarray, y: np.ndarray, params: XGBParams, n_estimators: int, train_row_indices: Optional[np.ndarray] = None) -> Any:
 	spw = compute_scale_pos_weight(y)
 	# Try sklearn wrapper
 	try:
 		model = _build_sklearn_xgb(params, spw)
 		model.set_params(n_estimators=int(n_estimators))
-		model.fit(X, y, verbose=False)
+		# Optional time-decay weights
+		sample_weight = None
+		if params.time_decay_half_life is not None and train_row_indices is not None and len(train_row_indices) == len(y):
+			max_idx = int(train_row_indices.max())
+			age = (max_idx - train_row_indices).astype(float)
+			decay = np.power(0.5, age / float(max(1, params.time_decay_half_life)))
+			sample_weight = np.clip(decay, float(params.time_decay_min_weight), 1.0)
+		model.fit(X, y, verbose=False, sample_weight=sample_weight)
 		return model
 	except TypeError:
 		pass
 	# Fallback to xgb.train
-	dtrain = xgb.DMatrix(X, label=y)
+	# Compute weights if requested
+	weights = None
+	if params.time_decay_half_life is not None and train_row_indices is not None and len(train_row_indices) == len(y):
+		max_idx = int(train_row_indices.max())
+		age = (max_idx - train_row_indices).astype(float)
+		decay = np.power(0.5, age / float(max(1, params.time_decay_half_life)))
+		weights = np.clip(decay, float(params.time_decay_min_weight), 1.0)
+	dtrain = xgb.DMatrix(X, label=y, weight=weights)
 	xgb_params = {
 		'max_depth': params.max_depth,
 		'eta': params.learning_rate,
@@ -452,13 +524,142 @@ def feature_importance_plot(model: XGBClassifier, feature_names: List[str], out_
 	plt.close()
 
 
-def plot_test_predictions_vs_price(model: XGBClassifier,
+def plot_training_vs_test_accuracy(model: XGBClassifier,
 							scaler: StandardScaler,
 							data_csv: str,
 							plots_dir: str,
 							test_start_date: str,
+							target_cleanup_enabled: bool = False,
+							target_horizon: int = 14,
+							target_band: float = 0.005,
+							keep_ambiguous: bool = False,
 							threshold: float = 0.5,
+							window_size: int = 50,
 							verbose: bool = True) -> None:
+	"""
+	Plot rolling training vs test accuracy to visualize potential overfitting.
+	"""
+	if not verbose:
+		return
+
+	print("  📊 Generating training vs test accuracy comparison...")
+
+	# Load and prepare data
+	df = load_dataset(data_csv)
+	if target_cleanup_enabled:
+		df = apply_target_cleanup(df, horizon=int(target_horizon), band=float(target_band), drop_ambiguous=not bool(keep_ambiguous))
+	X_df, y, feature_names = select_features_and_target(df)
+	X = X_df.values.astype(np.float32)
+
+	# Split by date
+	test_start = pd.to_datetime(test_start_date)
+	if 'Date' in df.columns:
+		test_mask = df['Date'] >= test_start
+		train_mask = ~test_mask
+		train_dates = df['Date'][train_mask].values
+		test_dates = df['Date'][test_mask].values
+	else:
+		split_idx = int(len(X) * 0.8)
+		train_mask = np.arange(len(X)) < split_idx
+		test_mask = ~train_mask
+		train_dates = np.arange(train_mask.sum())
+		test_dates = np.arange(test_mask.sum())
+
+	X_train = X[train_mask]
+	X_test = X[test_mask]
+	y_train = y[train_mask]
+	y_test = y[test_mask]
+
+	# Scale using provided scaler (fit upstream on pre-holdout)
+	X_train_scaled = scaler.transform(X_train)
+	X_test_scaled = scaler.transform(X_test)
+
+	# Predictions
+	train_prob = model.predict_proba(X_train_scaled)[:, 1]
+	test_prob = model.predict_proba(X_test_scaled)[:, 1]
+	train_bin = (train_prob >= threshold).astype(int)
+	test_bin = (test_prob >= threshold).astype(int)
+
+	# Rolling accuracy
+	train_roll, train_roll_dates = [], []
+	test_roll, test_roll_dates = [], []
+	if len(train_bin) >= window_size:
+		for i in range(window_size, len(train_bin)):
+			train_roll.append(np.mean(train_bin[i-window_size:i] == y_train[i-window_size:i]))
+			train_roll_dates.append(train_dates[i])
+	if len(test_bin) >= window_size:
+		for i in range(window_size, len(test_bin)):
+			test_roll.append(np.mean(test_bin[i-window_size:i] == y_test[i-window_size:i]))
+			test_roll_dates.append(test_dates[i])
+
+	# Plot
+	fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
+	fig.suptitle(f'Training vs Test Accuracy ({window_size}-day rolling)', fontsize=16, fontweight='bold')
+
+	if train_roll:
+		ax1.plot(train_roll_dates, train_roll, color='tab:blue', label='Train', linewidth=2)
+	if test_roll:
+		ax1.plot(test_roll_dates, test_roll, color='tab:red', label='Test', linewidth=2)
+	ax1.axhline(0.5, color='gray', linestyle='--', alpha=0.5)
+	ax1.set_ylabel('Accuracy')
+	ax1.grid(True, alpha=0.3)
+	ax1.legend()
+
+	# Add vertical line to show train/test split
+	if 'Date' in df.columns:
+		ax1.axvline(x=test_start, color='black', linestyle='-', alpha=0.7, linewidth=2, label='Train/Test Split')
+		ax1.legend()
+
+	# Histogram comparison
+	if train_roll:
+		ax2.hist(train_roll, bins=20, alpha=0.6, density=True, label='Train', color='tab:blue')
+	if test_roll:
+		ax2.hist(test_roll, bins=20, alpha=0.6, density=True, label='Test', color='tab:red')
+	ax2.axvline(0.5, color='gray', linestyle='--', alpha=0.5)
+	ax2.set_xlabel('Accuracy')
+	ax2.set_ylabel('Density')
+	ax2.grid(True, alpha=0.3)
+	ax2.legend()
+
+	# Format x-axis dates if we have date data
+	if 'Date' in df.columns and (train_roll_dates or test_roll_dates):
+		# Get all dates to set proper range
+		all_dates = []
+		if train_roll_dates:
+			all_dates.extend(train_roll_dates)
+		if test_roll_dates:
+			all_dates.extend(test_roll_dates)
+		
+		if all_dates:
+			# Set x-axis formatting
+			ax1.xaxis.set_major_locator(plt.matplotlib.dates.YearLocator(2))  # Every 2 years
+			ax1.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y'))
+			ax1.xaxis.set_minor_locator(plt.matplotlib.dates.YearLocator(1))  # Every year
+			plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+			
+			# Set x-axis limits to span full date range
+			min_date = min(all_dates)
+			max_date = max(all_dates)
+			ax1.set_xlim(min_date, max_date)
+
+	plt.tight_layout()
+	os.makedirs(plots_dir, exist_ok=True)
+	plot_path = os.path.join(plots_dir, 'xgb_training_vs_test_accuracy.png')
+	plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+	print(f"  📈 Training vs test accuracy plot saved to: {plot_path}")
+	plt.show()
+
+def plot_test_predictions_vs_price(model: XGBClassifier,
+						scaler: StandardScaler,
+						data_csv: str,
+						plots_dir: str,
+						test_start_date: str,
+						target_cleanup_enabled: bool = False,
+						target_horizon: int = 14,
+						target_band: float = 0.005,
+						keep_ambiguous: bool = False,
+						threshold: float = 0.5,
+						verbose: bool = True) -> None:
 	"""
 	Create a plot showing XGBoost model predictions vs S&P 500 price for the test set (2022 onwards).
 	"""
@@ -469,6 +670,8 @@ def plot_test_predictions_vs_price(model: XGBClassifier,
 	
 	# Load and prepare data
 	df = load_dataset(data_csv)
+	if target_cleanup_enabled:
+		df = apply_target_cleanup(df, horizon=int(target_horizon), band=float(target_band), drop_ambiguous=not bool(keep_ambiguous))
 	X_df, y, feature_names = select_features_and_target(df)
 	X = X_df.values.astype(np.float32)
 	
@@ -503,7 +706,7 @@ def plot_test_predictions_vs_price(model: XGBClassifier,
 	# Create the visualization
 	fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 12), sharex=True)
 	fig.suptitle(f'XGBoost Model Predictions vs S&P 500 Price (Test Set: {test_start_date} onwards)', 
-				 fontsize=16, fontweight='bold')
+			 fontsize=16, fontweight='bold')
 	
 	# Plot 1: S&P 500 Price
 	if test_prices is not None:
@@ -675,7 +878,7 @@ def plot_training_history_xgb(fold_histories: List[Dict],
 	axes[1].grid(True, alpha=0.3, axis='y')
 	for bar, value in zip(bars, avg_metrics):
 		axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-					   f'{value:.3f}', ha='center', va='bottom', fontweight='bold')
+					f'{value:.3f}', ha='center', va='bottom', fontweight='bold')
 
 	# Plot 3: Individual fold performance
 	fold_aucs = [m['auc'] for m in val_metrics]
@@ -734,12 +937,23 @@ def main() -> None:
 	parser.add_argument('--seed', type=int, default=42)
 	parser.add_argument('--verbose', action='store_true')
 	parser.add_argument('--calibrate', action='store_true', help='Enable Platt scaling using OOF predictions')
+	# Regularization and weighting controls
+	parser.add_argument('--time_decay_half_life', type=int, default=0, help='Half-life (in rows) for time-decay sample weighting (0=disabled)')
+	parser.add_argument('--time_decay_min_weight', type=float, default=0.05, help='Minimum floor weight for oldest samples [0,1]')
+	parser.add_argument('--final_train_trailing_window', type=int, default=0, help='If >0, refit final model on only last N pre-holdout rows')
+	# Target-side cleanup options
+	parser.add_argument('--target_cleanup', action='store_true', help='Recompute target via forward return with neutral band and drop ambiguous rows')
+	parser.add_argument('--target_horizon', type=int, default=14, help='Forward horizon in days for target construction')
+	parser.add_argument('--target_band', type=float, default=0.005, help='Neutral band for forward return; |ret| <= band is ambiguous')
+	parser.add_argument('--keep_ambiguous', action='store_true', help='Keep rows within the neutral band instead of dropping')
 	args = parser.parse_args()
 
 	set_seed(args.seed)
 	ensure_dirs(args.models_dir, args.plots_dir)
 
 	df = load_dataset(args.data)
+	if args.target_cleanup:
+		df = apply_target_cleanup(df, horizon=int(args.target_horizon), band=float(args.target_band), drop_ambiguous=not bool(args.keep_ambiguous))
 	X_df, y, feature_names = select_features_and_target(df)
 	X = X_df.values.astype(np.float32)
 	
@@ -747,6 +961,16 @@ def main() -> None:
 	params.device = args.device
 	params.use_scaler = bool(args.use_scaler)
 	params.calibrate = bool(args.calibrate)
+	# Time-decay controls
+	params.time_decay_half_life = int(args.time_decay_half_life) if int(args.time_decay_half_life) > 0 else None
+	params.time_decay_min_weight = float(args.time_decay_min_weight)
+
+	# Enforce a purged gap at least equal to the target horizon to avoid label leakage
+	# across train/validation boundaries in time-series CV (Purged Walk-Forward CV).
+	# This is critical when targets depend on future windows of length `target_horizon`.
+	params.gap = int(max(params.gap, int(args.target_horizon)))
+	if args.verbose:
+		print(f"Using purged gap={params.gap} (>= target_horizon={int(args.target_horizon)})")
 
 	if args.verbose:
 		print(f"Rows: {X.shape[0]}, Features: {X.shape[1]}")
@@ -810,16 +1034,19 @@ def main() -> None:
 		y_train_es = y[last_train_idx]
 		y_val_es = y[last_val_idx]
 
-		_, best_n, _ = fit_xgb_with_es_compat(X_train_es, y_train_es, X_val_es, y_val_es, params)
+		_, best_n, _ = fit_xgb_with_es_compat(X_train_es, y_train_es, X_val_es, y_val_es, params, train_row_indices=last_train_idx)
 		if best_n is None:
 			best_n = params.n_estimators
 		# Refit on full pre-holdout data using the best number of trees
 		full_idx = np.concatenate([last_train_idx, last_val_idx])
 		full_idx = np.unique(full_idx)
-		# The scaler was already fit on the training portion, so we just transform the full pre-holdout data
+		# Optionally restrict to a trailing window to reduce reliance on very old regimes
+		if int(args.final_train_trailing_window) > 0 and len(full_idx) > int(args.final_train_trailing_window):
+			full_idx = full_idx[-int(args.final_train_trailing_window):]
+		# The scaler was already fit on the training portion, so we just transform the selected pre-holdout data
 		X_full = scaler.transform(X[full_idx])
 		y_full = y[full_idx]
-		model_final = fit_xgb_no_es(X_full, y_full, params, n_estimators=int(best_n))
+		model_final = fit_xgb_no_es(X_full, y_full, params, n_estimators=int(best_n), train_row_indices=full_idx)
 		if args.verbose:
 			print(f"Final model trained with n_estimators={int(best_n)} on pre-holdout data size={len(full_idx)}")
 		final_model = model_final
@@ -880,6 +1107,23 @@ def main() -> None:
 			data_csv=args.data,
 			plots_dir=args.plots_dir,
 			test_start_date=args.test_start_date,
+			target_cleanup_enabled=bool(args.target_cleanup),
+			target_horizon=int(args.target_horizon),
+			target_band=float(args.target_band),
+			keep_ambiguous=bool(args.keep_ambiguous),
+			threshold=chosen_thr,
+			verbose=args.verbose
+		)
+		plot_training_vs_test_accuracy(
+			model=final_model,
+			scaler=final_scaler,
+			data_csv=args.data,
+			plots_dir=args.plots_dir,
+			test_start_date=args.test_start_date,
+			target_cleanup_enabled=bool(args.target_cleanup),
+			target_horizon=int(args.target_horizon),
+			target_band=float(args.target_band),
+			keep_ambiguous=bool(args.keep_ambiguous),
 			threshold=chosen_thr,
 			verbose=args.verbose
 		)
