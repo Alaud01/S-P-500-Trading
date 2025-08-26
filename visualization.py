@@ -33,7 +33,7 @@ def load_and_prepare_data():
     
     return df
 
-def analyze_target_distribution(df):
+def analyze_target_distribution(df, plots_dir):
     """Analyze the target variable distribution"""
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
     
@@ -79,7 +79,7 @@ def analyze_target_distribution(df):
     plt.savefig(f'{plots_dir}/target_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-def analyze_feature_correlations(df):
+def analyze_feature_correlations(df, plots_dir):
     """Analyze correlations between features and target"""
     # Select numerical features (excluding Date and Target)
     numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -129,7 +129,7 @@ def analyze_feature_correlations(df):
     
     return correlations
 
-def analyze_technical_indicators(df):
+def analyze_technical_indicators(df, plots_dir):
     """Analyze technical indicators and their relationship with target"""
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
@@ -167,7 +167,7 @@ def analyze_technical_indicators(df):
     plt.savefig(f'{plots_dir}/technical_indicators_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-def analyze_sentiment_and_news(df):
+def analyze_sentiment_and_news(df, plots_dir):
     """Analyze sentiment and news features"""
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
@@ -207,7 +207,7 @@ def analyze_sentiment_and_news(df):
     plt.savefig(f'{plots_dir}/sentiment_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-def analyze_economic_indicators(df):
+def analyze_economic_indicators(df, plots_dir):
     """Analyze economic indicators"""
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
@@ -246,7 +246,7 @@ def analyze_economic_indicators(df):
     plt.savefig(f'{plots_dir}/economic_indicators_analysis.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-def perform_feature_selection(df):
+def perform_feature_selection(df, plots_dir):
     """Perform feature selection analysis"""
     # Prepare data for feature selection
     numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -399,22 +399,22 @@ def main():
     
     # Run analyses
     print("\nAnalyzing target distribution...")
-    analyze_target_distribution(df)
+    analyze_target_distribution(df, plots_dir)
     
     print("\nAnalyzing feature correlations...")
-    correlations = analyze_feature_correlations(df)
+    correlations = analyze_feature_correlations(df, plots_dir)
     
     print("\nAnalyzing technical indicators...")
-    analyze_technical_indicators(df)
+    analyze_technical_indicators(df, plots_dir)
     
     print("\nAnalyzing sentiment and news features...")
-    analyze_sentiment_and_news(df)
+    analyze_sentiment_and_news(df, plots_dir)
     
     print("\nAnalyzing economic indicators...")
-    analyze_economic_indicators(df)
+    analyze_economic_indicators(df, plots_dir)
     
     print("\nPerforming feature selection analysis...")
-    mi_df, f_df = perform_feature_selection(df)
+    mi_df, f_df = perform_feature_selection(df, plots_dir)
     
     print("\nGenerating summary report...")
     generate_summary_report(df, correlations, mi_df, f_df)
