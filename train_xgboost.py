@@ -1,4 +1,4 @@
-# run command: python train_xgboost.py --use_scaler --target_cleanup --target_horizon 14 --target_band 0.005 --verbose
+# run command: python train_xgboost.py --data data/final_dataset_for_modeling.csv --use_scaler --target_cleanup --target_horizon 14 --target_band 0.005 --auto_time_decay_years 4 --final_train_trailing_years 8 --verbose
 
 import os
 import json
@@ -39,9 +39,9 @@ class _IdentityScaler:
 @dataclass
 class XGBParams:
 	# Core params
-	n_estimators: int = 800
-	max_depth: int = 4
-	learning_rate: float = 0.03
+	n_estimators: int = 1500
+	max_depth: int = 3
+	learning_rate: float = 0.005
 	subsample: float = 0.8
 	colsample_bytree: float = 0.6
 	min_child_weight: float = 5.0
@@ -937,10 +937,13 @@ def main() -> None:
 	parser.add_argument('--seed', type=int, default=42)
 	parser.add_argument('--verbose', action='store_true')
 	parser.add_argument('--calibrate', action='store_true', help='Enable Platt scaling using OOF predictions')
+	parser.add_argument('--smoke', action='store_true', help='Run a quick, lightweight training (reduced folds/trees)')
 	# Regularization and weighting controls
 	parser.add_argument('--time_decay_half_life', type=int, default=0, help='Half-life (in rows) for time-decay sample weighting (0=disabled)')
 	parser.add_argument('--time_decay_min_weight', type=float, default=0.05, help='Minimum floor weight for oldest samples [0,1]')
 	parser.add_argument('--final_train_trailing_window', type=int, default=0, help='If >0, refit final model on only last N pre-holdout rows')
+	parser.add_argument('--auto_time_decay_years', type=int, default=3, help='If >0 and half-life not set, auto-apply time decay with half-life ~= years*252 rows')
+	parser.add_argument('--final_train_trailing_years', type=int, default=0, help='If >0 and trailing_window not set, refit final model on last years*252 rows')
 	# Target-side cleanup options
 	parser.add_argument('--target_cleanup', action='store_true', help='Recompute target via forward return with neutral band and drop ambiguous rows')
 	parser.add_argument('--target_horizon', type=int, default=14, help='Forward horizon in days for target construction')
@@ -956,6 +959,21 @@ def main() -> None:
 		df = apply_target_cleanup(df, horizon=int(args.target_horizon), band=float(args.target_band), drop_ambiguous=not bool(args.keep_ambiguous))
 	X_df, y, feature_names = select_features_and_target(df)
 	X = X_df.values.astype(np.float32)
+
+	# Check for presence of new engineered features and log
+	required_features = [
+		'Sentiment_Score', 'Headline_Count',
+		'GDP_QoQ_Pct_Change', 'Unemployment_MoM_Change', 'Interest_MoM_Change', 'Inflation_MoM_Change',
+		'Price_vs_MA30', 'RSI_Overbought', 'RSI_Oversold', 'MACD_Crossover'
+	]
+	present = [f for f in required_features if f in feature_names]
+	missing = [f for f in required_features if f not in feature_names]
+	if args.verbose:
+		print(f"Detected {len(feature_names)} features. Using all numeric features by default.")
+		if present:
+			print(f"New engineered features present: {present}")
+		if missing:
+			print(f"Warning: The following expected features are missing: {missing}")
 	
 	params = XGBParams()
 	params.device = args.device
@@ -964,6 +982,24 @@ def main() -> None:
 	# Time-decay controls
 	params.time_decay_half_life = int(args.time_decay_half_life) if int(args.time_decay_half_life) > 0 else None
 	params.time_decay_min_weight = float(args.time_decay_min_weight)
+
+	# Auto-apply time decay if not explicitly provided
+	if params.time_decay_half_life is None and int(args.auto_time_decay_years) > 0:
+		rows_per_year = 252  # approximate trading days per year
+		params.time_decay_half_life = int(rows_per_year * int(args.auto_time_decay_years))
+		if args.verbose:
+			print(f"Auto time-decay enabled: half-life={params.time_decay_half_life} rows (~{int(args.auto_time_decay_years)} years), min_weight={params.time_decay_min_weight}")
+
+	# Smoke mode adjustments for faster validation
+	if args.smoke:
+		params.n_estimators = 150
+		params.cv_splits = 3
+		params.val_window = 120
+		params.min_train_window = 240
+		params.early_stopping_rounds = 30
+		params.learning_rate = max(params.learning_rate, 0.03)
+		if args.verbose:
+			print("Smoke mode enabled: reduced trees/folds and smaller windows for quick validation.")
 
 	# Enforce a purged gap at least equal to the target horizon to avoid label leakage
 	# across train/validation boundaries in time-series CV (Purged Walk-Forward CV).
@@ -1041,6 +1077,9 @@ def main() -> None:
 		full_idx = np.concatenate([last_train_idx, last_val_idx])
 		full_idx = np.unique(full_idx)
 		# Optionally restrict to a trailing window to reduce reliance on very old regimes
+		# If years-based arg is provided and window not set, convert to rows (~252 trading days per year)
+		if int(args.final_train_trailing_window) <= 0 and int(args.final_train_trailing_years) > 0:
+			args.final_train_trailing_window = int(252 * int(args.final_train_trailing_years))
 		if int(args.final_train_trailing_window) > 0 and len(full_idx) > int(args.final_train_trailing_window):
 			full_idx = full_idx[-int(args.final_train_trailing_window):]
 		# The scaler was already fit on the training portion, so we just transform the selected pre-holdout data

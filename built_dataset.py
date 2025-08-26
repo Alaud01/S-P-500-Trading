@@ -106,53 +106,83 @@ def load_and_process_datasets():
 
 def process_sentiment_data(headlines_df, recent_headlines_df, sentiment_data):
     """
-    Process sentiment data to create daily sentiment scores.
-    Since we have yearly sentiment distribution, we'll create daily sentiment scores
-    based on the headlines data and sentiment analysis results.
+    Create daily-varying sentiment features from per-headline results if available.
+    Falls back to yearly distribution if detailed results are unavailable.
     """
     print("Processing sentiment data...")
-    
-    # Combine headlines data
-    all_headlines = pd.concat([
-        headlines_df[['Date', 'Title']],
-        recent_headlines_df[['Date', 'headline']].rename(columns={'headline': 'Title'})
-    ], ignore_index=True)
-    
-    # Remove duplicates and sort
-    all_headlines = all_headlines.drop_duplicates().sort_values('Date').reset_index(drop=True)
-    
-    # Create daily sentiment scores based on yearly distribution
-    # We'll use the sentiment distribution to assign sentiment scores to headlines
-    yearly_sentiment = sentiment_data['yearly_sentiment']
-    
-    # Create a mapping of years to sentiment scores
-    sentiment_scores = {}
-    for year in yearly_sentiment['positive'].keys():
-        positive_count = yearly_sentiment['positive'][year]
-        neutral_count = yearly_sentiment['neutral'][year]
-        negative_count = yearly_sentiment['negative'][year]
-        total_count = positive_count + neutral_count + negative_count
-        
-        if total_count > 0:
-            # Calculate average sentiment score for the year
-            # Positive = 1, Neutral = 0, Negative = -1
-            avg_sentiment = (positive_count - negative_count) / total_count
-            sentiment_scores[int(year)] = avg_sentiment
+
+    cutoff_date = pd.to_datetime('2024-03-04')
+
+    # Preferred path: use detailed per-headline results to build daily sentiment
+    try:
+        detailed_sentiment = pd.read_csv('data/sentiment_analysis_results.csv')
+
+        # Normalize/parse date column
+        if 'Date' in detailed_sentiment.columns:
+            detailed_sentiment['Date'] = pd.to_datetime(detailed_sentiment['Date'])
+        elif 'published_date' in detailed_sentiment.columns:
+            detailed_sentiment['Date'] = pd.to_datetime(detailed_sentiment['published_date']).dt.tz_localize(None)
         else:
-            sentiment_scores[int(year)] = 0
-    
-    # Assign sentiment scores to headlines based on year
-    all_headlines['Year'] = all_headlines['Date'].dt.year
-    all_headlines['Sentiment_Score'] = all_headlines['Year'].map(sentiment_scores)
-    
-    # Group by date and calculate average sentiment score for each day
-    daily_sentiment = all_headlines.groupby('Date').agg({
-        'Sentiment_Score': 'mean',
-        'Title': 'count'
-    }).reset_index()
-    daily_sentiment = daily_sentiment.rename(columns={'Title': 'Headline_Count'})
-    
-    return daily_sentiment
+            raise ValueError('No recognizable date column in detailed sentiment results')
+
+        # Clip to cutoff
+        detailed_sentiment = detailed_sentiment[detailed_sentiment['Date'] <= cutoff_date]
+
+        # Build a continuous sentiment score per headline
+        if {'positive_prob', 'negative_prob'}.issubset(detailed_sentiment.columns):
+            detailed_sentiment['Sentiment_Score'] = (
+                detailed_sentiment['positive_prob'] - detailed_sentiment['negative_prob']
+            )
+        elif 'sentiment' in detailed_sentiment.columns:
+            label_to_score = {'positive': 1.0, 'neutral': 0.0, 'negative': -1.0}
+            detailed_sentiment['Sentiment_Score'] = detailed_sentiment['sentiment'].map(label_to_score).fillna(0.0)
+        else:
+            raise ValueError('No sentiment probabilities or labels found in detailed sentiment results')
+
+        # Aggregate to daily level
+        daily_sentiment = detailed_sentiment.groupby('Date').agg(
+            Sentiment_Score=('Sentiment_Score', 'mean'),
+            Headline_Count=('Sentiment_Score', 'size')
+        ).reset_index()
+
+        return daily_sentiment.sort_values('Date').reset_index(drop=True)
+
+    except Exception as e:
+        print(f"Detailed per-headline sentiment not available or failed to load. Falling back. Reason: {e}")
+
+        # Fallback path: approximate using yearly distribution from JSON
+        all_headlines = pd.concat([
+            headlines_df[['Date', 'Title']],
+            recent_headlines_df[['Date', 'headline']].rename(columns={'headline': 'Title'})
+        ], ignore_index=True)
+
+        all_headlines = all_headlines.drop_duplicates().sort_values('Date').reset_index(drop=True)
+
+        yearly_sentiment = sentiment_data['yearly_sentiment']
+
+        sentiment_scores = {}
+        for year in yearly_sentiment['positive'].keys():
+            positive_count = yearly_sentiment['positive'][year]
+            neutral_count = yearly_sentiment['neutral'][year]
+            negative_count = yearly_sentiment['negative'][year]
+            total_count = positive_count + neutral_count + negative_count
+
+            if total_count > 0:
+                avg_sentiment = (positive_count - negative_count) / total_count
+                sentiment_scores[int(year)] = avg_sentiment
+            else:
+                sentiment_scores[int(year)] = 0
+
+        all_headlines['Year'] = all_headlines['Date'].dt.year
+        all_headlines['Sentiment_Score'] = all_headlines['Year'].map(sentiment_scores)
+
+        daily_sentiment = all_headlines.groupby('Date').agg({
+            'Sentiment_Score': 'mean',
+            'Title': 'count'
+        }).reset_index()
+        daily_sentiment = daily_sentiment.rename(columns={'Title': 'Headline_Count'})
+
+        return daily_sentiment.sort_values('Date').reset_index(drop=True)
 
 def create_merged_dataset(datasets):
     """
@@ -262,6 +292,19 @@ def feature_engineering(df):
     df['BB_Lower'] = df['BB_Middle'] - (bb_std * 2)
     df['BB_Width'] = df['BB_Upper'] - df['BB_Lower']
     df['BB_Position'] = (df['Close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
+    
+    # Macro change features (exclude gold)
+    # Note: These will typically be zero on non-release days due to forward fill.
+    df['GDP_QoQ_Pct_Change'] = df['GDP'].pct_change()
+    df['Unemployment_MoM_Change'] = df['Unemployment_Rate'].diff()
+    df['Interest_MoM_Change'] = df['Interest_Rate'].diff()
+    df['Inflation_MoM_Change'] = df['Inflation_Rate'].diff()
+    
+    # Binary/interaction features
+    df['Price_vs_MA30'] = (df['Close'] > df['MA_30']).astype(int)
+    df['RSI_Overbought'] = (df['RSI'] > 70).astype(int)
+    df['RSI_Oversold'] = (df['RSI'] < 30).astype(int)
+    df['MACD_Crossover'] = (df['MACD'] > df['Signal_Line']).astype(int)
     
     # Lagged features
     for lag in [1, 3, 5, 7, 14]:

@@ -1,22 +1,22 @@
 {
   "cv": {
-    "auc": 0.5755588737469645,
-    "f1": 0.4605796555606557
+    "auc": 0.5396786463475476,
+    "f1": 0.7059196925522335
   },
   "best_threshold_cv": 0.5,
   "oof_threshold": 0.5,
   "holdout": {
-    "auc": 0.527100661355442,
-    "accuracy": 0.6485165794066318,
-    "balanced_accuracy": 0.5,
-    "precision": 0.6485165794066318,
-    "recall": 1.0,
-    "f1": 0.7867880584374338
+    "auc": 0.4985415118245913,
+    "accuracy": 0.38798102266736956,
+    "balanced_accuracy": 0.5062745094497692,
+    "precision": 0.6771929824561403,
+    "recall": 0.07965332232769294,
+    "f1": 0.14254062038404727
   },
   "params": {
-    "n_estimators": 800,
-    "max_depth": 4,
-    "learning_rate": 0.03,
+    "n_estimators": 1500,
+    "max_depth": 3,
+    "learning_rate": 0.005,
     "subsample": 0.8,
     "colsample_bytree": 0.6,
     "min_child_weight": 5.0,
@@ -33,9 +33,9 @@
     "val_window": 250,
     "gap": 14,
     "min_train_window": 750,
-    "use_scaler": true,
-    "time_decay_half_life": 500,
-    "time_decay_min_weight": 0.1,
+    "use_scaler": false,
+    "time_decay_half_life": 756,
+    "time_decay_min_weight": 0.05,
     "early_stopping_rounds": 100,
     "test_size_holdout": 0.15,
     "calibrate": false
@@ -67,6 +67,14 @@
     "BB_Lower",
     "BB_Width",
     "BB_Position",
+    "GDP_QoQ_Pct_Change",
+    "Unemployment_MoM_Change",
+    "Interest_MoM_Change",
+    "Inflation_MoM_Change",
+    "Price_vs_MA30",
+    "RSI_Overbought",
+    "RSI_Oversold",
+    "MACD_Crossover",
     "Close_Lag_1",
     "Volume_Lag_1",
     "Sentiment_Lag_1",
@@ -83,7 +91,7 @@
     "Volume_Lag_14",
     "Sentiment_Lag_14"
   ],
-  "best_n_estimators_pre_holdout": 800,
+  "best_n_estimators_pre_holdout": 1500,
   "calibration": {
     "enabled": false,
     "coef": null,

@@ -1081,6 +1081,21 @@ def main():
     X_df, y, feature_names = select_features_and_target(df)
     X = X_df.values.astype(np.float32)
     
+    # Log presence of new engineered features
+    required_features = [
+        'Sentiment_Score', 'Headline_Count',
+        'GDP_QoQ_Pct_Change', 'Unemployment_MoM_Change', 'Interest_MoM_Change', 'Inflation_MoM_Change',
+        'Price_vs_MA30', 'RSI_Overbought', 'RSI_Oversold', 'MACD_Crossover'
+    ]
+    present = [f for f in required_features if f in feature_names]
+    missing = [f for f in required_features if f not in feature_names]
+    if args.verbose:
+        print(f"Detected {len(feature_names)} features. Using all numeric features by default.")
+        if present:
+            print(f"New engineered features present: {present}")
+        if missing:
+            print(f"Warning: The following expected features are missing: {missing}")
+    
     if args.verbose:
         print(f"Dataset loaded successfully:")
         print(f"  Shape: {X.shape}")
