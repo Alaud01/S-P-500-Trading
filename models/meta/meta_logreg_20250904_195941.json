@@ -1,0 +1,24 @@
+{
+  "type": "logistic_regression",
+  "feature_names": [
+    "prob_lstm",
+    "prob_xgb"
+  ],
+  "coef": [
+    1.4036255289789015,
+    0.1135666652519745
+  ],
+  "intercept": 0.30156912226629545,
+  "threshold_metric": "accuracy",
+  "used_threshold": 0.39999999999999997,
+  "scaler_mean": [
+    0.6075665874803274,
+    0.6114792688056849
+  ],
+  "scaler_scale": [
+    0.18540370030609668,
+    0.12691472298183115
+  ],
+  "lstm_seq_len": 60,
+  "timestamp": "2025-09-04 19:59:41"
+}

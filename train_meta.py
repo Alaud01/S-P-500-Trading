@@ -1,4 +1,4 @@
-# Run command: source .venv/bin/activate && python train_meta.py --verbose
+# Run command: source .venv/bin/activate && python train_meta.py --verbose --threshold-metric accuracy --logreg-grid 0.01,0.1,1.0,10.0
 import os
 import json
 import time
@@ -13,7 +13,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_fscore_support, balanced_accuracy_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_fscore_support, balanced_accuracy_score, roc_curve, precision_recall_curve, average_precision_score
+from sklearn.calibration import calibration_curve
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -84,6 +86,8 @@ def find_best_threshold(y_prob: np.ndarray, y_true: np.ndarray, metric: str = 'f
             tpr = tp / max(tp + fn, 1)
             fpr = fp / max(fp + tn, 1)
             score = tpr - fpr
+        elif metric == 'accuracy':
+            score = accuracy_score(y_true, preds)
         else:
             _, _, f1, _ = precision_recall_fscore_support(y_true, preds, average='binary', zero_division=0)
             score = float(f1)
@@ -262,74 +266,12 @@ def predict_xgb_for_all(
     return dates, prices, prob_pos, y.astype(int), feature_names
 
 
-# ---- Meta-model (FNN) ----
-class MetaFNN(nn.Module):
-    def __init__(self, input_dim: int = 2, hidden_dim: int = 32, dropout: float = 0.1):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)
-
-
-@torch.no_grad()
-def predict_probs(model: nn.Module, X: np.ndarray, batch_size: int, device: torch.device) -> np.ndarray:
-    model.eval()
-    probs: List[float] = []
-    for i in range(0, len(X), batch_size):
-        xb = torch.from_numpy(X[i:i+batch_size]).float().to(device)
-        logits = model(xb)
-        p = torch.sigmoid(logits).detach().cpu().numpy()
-        probs.extend(p.tolist())
-    return np.asarray(probs, dtype=np.float32)
+# ---- Meta-model (Logistic Regression) ----
 
 
 def plot_training_history_meta(history: Dict[str, List[float]], plots_dir: str, verbose: bool = True) -> None:
-    if not verbose:
-        return
-    os.makedirs(plots_dir, exist_ok=True)
-    print("  📊 Generating meta-model training plots...")
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle('Meta-Model (FNN) Training History', fontsize=16, fontweight='bold')
-
-    epochs = range(1, len(history['train_loss']) + 1)
-    axes[0].plot(epochs, history['train_loss'], label='Train Loss', linewidth=2)
-    axes[0].plot(epochs, history['val_loss'], label='Val Loss', linewidth=2, linestyle='--')
-    axes[0].set_title('Loss Over Epochs')
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('BCE Loss')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(epochs, history['train_auc'], label='Train AUC', linewidth=2)
-    axes[1].plot(epochs, history['val_auc'], label='Val AUC', linewidth=2, linestyle='--')
-    axes[1].set_title('AUC Over Epochs')
-    axes[1].set_xlabel('Epoch')
-    axes[1].set_ylabel('AUC')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-
-    axes[2].plot(epochs, history['train_f1'], label='Train F1', linewidth=2)
-    axes[2].plot(epochs, history['val_f1'], label='Val F1', linewidth=2, linestyle='--')
-    axes[2].set_title('F1 Over Epochs')
-    axes[2].set_xlabel('Epoch')
-    axes[2].set_ylabel('F1')
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plot_path = os.path.join(plots_dir, 'meta_training_plots.png')
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    print(f"  📈 Training plots saved to: {plot_path}")
-    plt.show()
+    # For logistic regression, we do not have epoch-wise history; skip plotting.
+    return
 
 
 def plot_meta_predictions_vs_price(dates: np.ndarray, prices: np.ndarray, y_true: np.ndarray, y_prob: np.ndarray, plots_dir: str, test_start_date: str, verbose: bool = True) -> None:
@@ -338,7 +280,7 @@ def plot_meta_predictions_vs_price(dates: np.ndarray, prices: np.ndarray, y_true
     print("  📊 Generating meta-model predictions vs price visualization...")
     os.makedirs(plots_dir, exist_ok=True)
 
-    threshold, _ = find_best_threshold(y_prob, y_true, metric='f1')
+    threshold, _ = find_best_threshold(y_prob, y_true, metric='accuracy')
     pred_binary = (y_prob >= threshold).astype(int)
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 12), sharex=True)
@@ -459,7 +401,7 @@ def plot_meta_predictions_vs_price(dates: np.ndarray, prices: np.ndarray, y_true
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Train FNN Meta-Model using LSTM and XGBoost predictions')
+    parser = argparse.ArgumentParser(description='Train Logistic Regression Meta-Model using LSTM and XGBoost predictions')
     parser.add_argument('--data-csv', type=str, default='data/final_dataset_for_modeling.csv')
     parser.add_argument('--models-dir', type=str, default='models/meta')
     parser.add_argument('--plots-dir', type=str, default='plots/meta')
@@ -469,13 +411,12 @@ def main() -> None:
     parser.add_argument('--xgb-model-path', type=str, default='')
     parser.add_argument('--xgb-report-path', type=str, default='')
     parser.add_argument('--meta-holdout-train-ratio', type=float, default=0.7)
-    # Meta FNN params
-    parser.add_argument('--meta-hidden', type=int, default=32)
-    parser.add_argument('--meta-dropout', type=float, default=0.1)
-    parser.add_argument('--meta-epochs', type=int, default=50)
-    parser.add_argument('--meta-batch', type=int, default=256)
-    parser.add_argument('--meta-lr', type=float, default=1e-3)
-    parser.add_argument('--threshold-metric', type=str, default='f1', choices=['f1', 'youden'])
+    # Logistic Regression params
+    parser.add_argument('--logreg-C', type=float, default=1.0)
+    parser.add_argument('--logreg-solver', type=str, default='lbfgs', choices=['lbfgs', 'liblinear', 'saga', 'newton-cg', 'sag'])
+    parser.add_argument('--logreg-grid', type=str, default='0.01,0.1,1.0,10.0')
+    parser.add_argument('--threshold-metric', type=str, default='accuracy', choices=['accuracy', 'f1', 'youden'])
+    parser.add_argument('--fixed-threshold', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--smoke', action='store_true')
@@ -486,7 +427,7 @@ def main() -> None:
 
     if args.verbose:
         print(f"{'='*60}")
-        print("META-MODEL TRAINING (FNN Stacking)")
+        print("META-MODEL TRAINING (Logistic Regression Stacking)")
         print(f"{'='*60}")
         print(f"Device: {device}")
         print(f"Data: {args.data_csv}")
@@ -616,12 +557,12 @@ def main() -> None:
     merged_cv = add_close(merged_cv)
     merged_te = add_close(merged_te)
 
-    # Prepare meta features/labels using only Close as additional input, per request
-    X_meta_cv = np.column_stack([merged_cv['prob_lstm'].values, merged_cv['prob_xgb'].values, merged_cv['Close'].values]).astype(np.float32)
+    # Prepare meta features/labels using only base model probabilities (no Close)
+    X_meta_cv = np.column_stack([merged_cv['prob_lstm'].values, merged_cv['prob_xgb'].values]).astype(np.float32)
     y_meta_cv = merged_cv['target'].values.astype(int)
     dates_meta_cv = merged_cv['Date'].values
 
-    X_meta_te = np.column_stack([merged_te['prob_lstm'].values, merged_te['prob_xgb'].values, merged_te['Close'].values]).astype(np.float32)
+    X_meta_te = np.column_stack([merged_te['prob_lstm'].values, merged_te['prob_xgb'].values]).astype(np.float32)
     y_meta_te = merged_te['target'].values.astype(int)
     dates_meta_te = merged_te['Date'].values
     prices_te = merged_te['Close'].values if 'Close' in merged_te.columns else None
@@ -636,107 +577,192 @@ def main() -> None:
     Xte_m, yte_m = X_meta_te, y_meta_te
     dates_te = dates_meta_te
 
-    # Optionally scale meta inputs (probabilities) lightly
+    # Scale meta inputs
     meta_scaler = StandardScaler().fit(Xtr_m)
     Xtr_m_s = meta_scaler.transform(Xtr_m).astype(np.float32)
     Xval_m_s = meta_scaler.transform(Xval_m).astype(np.float32)
     Xte_m_s = meta_scaler.transform(Xte_m).astype(np.float32)
 
-    train_loader = DataLoader(TensorDataset(torch.from_numpy(Xtr_m_s), torch.from_numpy(ytr_m)), batch_size=args.meta_batch, shuffle=True)
-    val_loader = DataLoader(TensorDataset(torch.from_numpy(Xval_m_s), torch.from_numpy(yval_m)), batch_size=args.meta_batch, shuffle=False)
+    # Train logistic regression with simple C grid search on CV-train split
+    feature_names_meta = ['prob_lstm', 'prob_xgb']
+    try:
+        c_grid = [float(x) for x in (args.logreg_grid.split(',') if args.logreg_grid else [args.logreg_C])]
+    except Exception:
+        c_grid = [args.logreg_C]
 
-    meta_epochs = args.meta_epochs if not args.smoke else 10
-    model_m = MetaFNN(input_dim=3, hidden_dim=args.meta_hidden if not args.smoke else 16, dropout=args.meta_dropout if not args.smoke else 0.1).to(device)
-    pos_weight_val = compute_class_pos_weight(ytr_m)
-    criterion_m = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_val], dtype=torch.float32, device=device))
-    optim_m = torch.optim.Adam(model_m.parameters(), lr=args.meta_lr if not args.smoke else 2e-3)
+    best_val_auc_lr = -1.0
+    best_C = None
+    best_logreg = None
+    best_train_probs = None
+    best_val_probs = None
+    for c_val in c_grid:
+        lr = LogisticRegression(C=c_val, solver=args.logreg_solver, class_weight='balanced', max_iter=1000, random_state=args.seed)
+        lr.fit(Xtr_m_s, ytr_m)
+        tr_probs = lr.predict_proba(Xtr_m_s)[:, 1]
+        vl_probs = lr.predict_proba(Xval_m_s)[:, 1]
+        vl_auc = roc_auc_score(yval_m, vl_probs) if len(np.unique(yval_m)) > 1 else 0.5
+        if vl_auc > best_val_auc_lr:
+            best_val_auc_lr = vl_auc
+            best_C = c_val
+            best_logreg = lr
+            best_train_probs = tr_probs
+            best_val_probs = vl_probs
 
-    history = { 'train_loss': [], 'val_loss': [], 'train_auc': [], 'val_auc': [], 'train_f1': [], 'val_f1': [] }
-    best_auc = -1.0
-    best_state = None
-    patience = max(5, meta_epochs // 4)
-    epochs_no_improve = 0
+    logreg = best_logreg if best_logreg is not None else LogisticRegression(C=args.logreg_C, solver=args.logreg_solver, class_weight='balanced', max_iter=1000, random_state=args.seed).fit(Xtr_m_s, ytr_m)
 
-    for epoch in range(meta_epochs):
-        model_m.train()
-        total_loss = 0.0
-        for xb, yb in train_loader:
-            xb = xb.float().to(device)
-            yb = yb.float().to(device)
-            optim_m.zero_grad()
-            logits = model_m(xb)
-            loss = criterion_m(logits, yb)
-            loss.backward()
-            nn.utils.clip_grad_norm_(model_m.parameters(), max_norm=1.0)
-            optim_m.step()
-            total_loss += loss.item() * xb.size(0)
-        train_loss = total_loss / len(train_loader.dataset)
+    # Threshold optimization based on selected metric (default accuracy) on TRAIN set
+    train_probs = best_train_probs if best_train_probs is not None else logreg.predict_proba(Xtr_m_s)[:, 1]
+    if args.fixed_threshold is not None and str(args.fixed_threshold).strip() != '':
+        used_threshold = float(args.fixed_threshold)
+    else:
+        used_threshold, _ = find_best_threshold(train_probs, ytr_m, metric=args.threshold_metric)
 
-        # Evaluate
-        model_m.eval()
-        with torch.no_grad():
-            # Train metrics
-            train_probs = predict_probs(model_m, Xtr_m_s, args.meta_batch, device)
-            train_thr, _ = find_best_threshold(train_probs, ytr_m, metric=args.threshold_metric)
-            train_metrics = evaluate_binary(ytr_m, train_probs, threshold=train_thr)
-            # Val metrics
-            val_probs = predict_probs(model_m, Xval_m_s, args.meta_batch, device)
-            val_thr, _ = find_best_threshold(val_probs, yval_m, metric=args.threshold_metric)
-            val_metrics = evaluate_binary(yval_m, val_probs, threshold=val_thr)
-            # Val loss
-            val_logits = model_m(torch.from_numpy(Xval_m_s).float().to(device))
-            val_loss = criterion_m(val_logits, torch.from_numpy(yval_m).float().to(device)).item()
+    # Evaluate on training and validation (for diagnosis) and test
+    val_probs = best_val_probs if best_val_probs is not None else logreg.predict_proba(Xval_m_s)[:, 1]
+    train_metrics = evaluate_binary(ytr_m, train_probs, threshold=used_threshold)
+    val_metrics = evaluate_binary(yval_m, val_probs, threshold=used_threshold)
 
-        history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
-        history['train_auc'].append(train_metrics['auc'])
-        history['val_auc'].append(val_metrics['auc'])
-        history['train_f1'].append(train_metrics['f1'])
-        history['val_f1'].append(val_metrics['f1'])
+    y_prob_test = logreg.predict_proba(Xte_m_s)[:, 1]
+    test_metrics = evaluate_binary(yte_m, y_prob_test, threshold=used_threshold)
 
-        is_improve = val_metrics['auc'] > best_auc
-        if is_improve:
-            best_auc = val_metrics['auc']
-            best_state = model_m.state_dict()
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
+    # --- Diagnostic Plots: learning curve, ROC/PR, threshold sweep, calibration ---
+    def plot_meta_learning_curves(Xtr: np.ndarray, ytr: np.ndarray, Xval: np.ndarray, yval: np.ndarray, chosen_C: float, solver: str, plots_dir: str, verbose: bool = True) -> None:
+        if not verbose:
+            return
+        os.makedirs(plots_dir, exist_ok=True)
+        sizes = np.linspace(0.2, 1.0, 5)
+        train_auc_list, val_auc_list = [], []
+        train_acc_list, val_acc_list = [], []
+        for frac in sizes:
+            n = max(10, int(len(Xtr) * float(frac)))
+            Xtr_sub, ytr_sub = Xtr[:n], ytr[:n]
+            lr = LogisticRegression(C=chosen_C, solver=solver, class_weight='balanced', max_iter=1000, random_state=42)
+            lr.fit(Xtr_sub, ytr_sub)
+            tr_probs = lr.predict_proba(Xtr_sub)[:, 1]
+            vl_probs = lr.predict_proba(Xval)[:, 1]
+            tr_auc = roc_auc_score(ytr_sub, tr_probs) if len(np.unique(ytr_sub)) > 1 else 0.5
+            vl_auc = roc_auc_score(yval, vl_probs) if len(np.unique(yval)) > 1 else 0.5
+            tr_thr, _ = find_best_threshold(tr_probs, ytr_sub, metric='accuracy')
+            tr_acc = accuracy_score(ytr_sub, (tr_probs >= tr_thr).astype(int))
+            vl_acc = accuracy_score(yval, (vl_probs >= tr_thr).astype(int))
+            train_auc_list.append(tr_auc)
+            val_auc_list.append(vl_auc)
+            train_acc_list.append(tr_acc)
+            val_acc_list.append(vl_acc)
 
-        if args.verbose and (epoch % 1 == 0 or epoch == meta_epochs - 1):
-            print(f"[META] Epoch {epoch+1:3d}/{meta_epochs} | TrainLoss: {train_loss:.4f} | ValLoss: {val_loss:.4f} | Train AUC: {train_metrics['auc']:.4f} | Val AUC: {val_metrics['auc']:.4f} | Train F1: {train_metrics['f1']:.4f} | Val F1: {val_metrics['f1']:.4f}")
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Meta LR Learning Curves', fontsize=14, fontweight='bold')
+        axes[0].plot(sizes, train_auc_list, label='Train AUC', marker='o')
+        axes[0].plot(sizes, val_auc_list, label='Val AUC', marker='o')
+        axes[0].set_xlabel('Training Fraction')
+        axes[0].set_ylabel('AUC')
+        axes[0].legend(); axes[0].grid(True, alpha=0.3)
+        axes[1].plot(sizes, train_acc_list, label='Train Acc', marker='o')
+        axes[1].plot(sizes, val_acc_list, label='Val Acc', marker='o')
+        axes[1].set_xlabel('Training Fraction')
+        axes[1].set_ylabel('Accuracy')
+        axes[1].legend(); axes[1].grid(True, alpha=0.3)
+        path = os.path.join(plots_dir, 'meta_learning_curves.png')
+        plt.tight_layout(); plt.savefig(path, dpi=300, bbox_inches='tight')
+        if verbose:
+            print(f"  📈 Learning curves saved to: {path}")
+        plt.show()
 
-        if epochs_no_improve >= patience:
-            if args.verbose:
-                print("[META] Early stopping")
-            break
+    def plot_meta_roc_pr(yv: np.ndarray, pv: np.ndarray, yt: np.ndarray, pt: np.ndarray, plots_dir: str, verbose: bool = True) -> None:
+        if not verbose:
+            return
+        os.makedirs(plots_dir, exist_ok=True)
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle('Meta LR ROC and PR Curves', fontsize=14, fontweight='bold')
+        # ROC
+        fpr_v, tpr_v, _ = roc_curve(yv, pv)
+        fpr_t, tpr_t, _ = roc_curve(yt, pt)
+        auc_v = roc_auc_score(yv, pv) if len(np.unique(yv)) > 1 else 0.5
+        auc_t = roc_auc_score(yt, pt) if len(np.unique(yt)) > 1 else 0.5
+        axes[0].plot(fpr_v, tpr_v, label=f'Val AUC={auc_v:.3f}')
+        axes[0].plot(fpr_t, tpr_t, label=f'Test AUC={auc_t:.3f}', linestyle='--')
+        axes[0].plot([0,1],[0,1], 'k--', alpha=0.3)
+        axes[0].set_xlabel('FPR'); axes[0].set_ylabel('TPR'); axes[0].legend(); axes[0].grid(True, alpha=0.3)
+        # PR
+        prec_v, rec_v, _ = precision_recall_curve(yv, pv)
+        prec_t, rec_t, _ = precision_recall_curve(yt, pt)
+        ap_v = average_precision_score(yv, pv)
+        ap_t = average_precision_score(yt, pt)
+        axes[1].plot(rec_v, prec_v, label=f'Val AP={ap_v:.3f}')
+        axes[1].plot(rec_t, prec_t, label=f'Test AP={ap_t:.3f}', linestyle='--')
+        axes[1].set_xlabel('Recall'); axes[1].set_ylabel('Precision'); axes[1].legend(); axes[1].grid(True, alpha=0.3)
+        path = os.path.join(plots_dir, 'meta_roc_pr.png')
+        plt.tight_layout(); plt.savefig(path, dpi=300, bbox_inches='tight')
+        if verbose:
+            print(f"  📈 ROC/PR curves saved to: {path}")
+        plt.show()
 
-    if best_state is not None:
-        model_m.load_state_dict(best_state)
+    def plot_meta_threshold_sweep(yv: np.ndarray, pv: np.ndarray, yt: np.ndarray, pt: np.ndarray, used_thr: float, plots_dir: str, verbose: bool = True) -> None:
+        if not verbose:
+            return
+        os.makedirs(plots_dir, exist_ok=True)
+        thrs = np.linspace(0.05, 0.95, 19)
+        def sweep(y, p):
+            accs, f1s = [], []
+            for t in thrs:
+                preds = (p >= t).astype(int)
+                accs.append(accuracy_score(y, preds))
+                f1s.append(precision_recall_fscore_support(y, preds, average='binary', zero_division=0)[2])
+            return np.array(accs), np.array(f1s)
+        acc_v, f1_v = sweep(yv, pv)
+        acc_t, f1_t = sweep(yt, pt)
+        fig, axes = plt.subplots(1, 2, figsize=(14,5))
+        fig.suptitle('Meta LR Threshold Sweep', fontsize=14, fontweight='bold')
+        axes[0].plot(thrs, acc_v, label='Val Acc')
+        axes[0].plot(thrs, acc_t, label='Test Acc', linestyle='--')
+        axes[0].axvline(x=used_thr, color='red', linestyle=':')
+        axes[0].set_xlabel('Threshold'); axes[0].set_ylabel('Accuracy'); axes[0].legend(); axes[0].grid(True, alpha=0.3)
+        axes[1].plot(thrs, f1_v, label='Val F1')
+        axes[1].plot(thrs, f1_t, label='Test F1', linestyle='--')
+        axes[1].axvline(x=used_thr, color='red', linestyle=':')
+        axes[1].set_xlabel('Threshold'); axes[1].set_ylabel('F1'); axes[1].legend(); axes[1].grid(True, alpha=0.3)
+        path = os.path.join(plots_dir, 'meta_threshold_sweep.png')
+        plt.tight_layout(); plt.savefig(path, dpi=300, bbox_inches='tight')
+        if verbose:
+            print(f"  📈 Threshold sweep saved to: {path}")
+        plt.show()
 
-    # Evaluate on test
-    y_prob_test = predict_probs(model_m, Xte_m_s, args.meta_batch, device)
-    best_thr_test, _ = find_best_threshold(y_prob_test, yte_m, metric=args.threshold_metric)
-    test_metrics = evaluate_binary(yte_m, y_prob_test, threshold=best_thr_test)
+    def plot_meta_calibration(y: np.ndarray, p: np.ndarray, plots_dir: str, verbose: bool = True) -> None:
+        if not verbose:
+            return
+        os.makedirs(plots_dir, exist_ok=True)
+        frac_pos, mean_pred = calibration_curve(y, p, n_bins=10, strategy='uniform')
+        fig, ax = plt.subplots(1, 1, figsize=(6,6))
+        ax.plot(mean_pred, frac_pos, marker='o')
+        ax.plot([0,1],[0,1], 'k--', alpha=0.3)
+        ax.set_title('Meta LR Calibration'); ax.set_xlabel('Mean predicted value'); ax.set_ylabel('Fraction of positives'); ax.grid(True, alpha=0.3)
+        path = os.path.join(plots_dir, 'meta_calibration.png')
+        plt.tight_layout(); plt.savefig(path, dpi=300, bbox_inches='tight')
+        if verbose:
+            print(f"  📈 Calibration plot saved to: {path}")
+        plt.show()
 
     # Save artifacts
     os.makedirs(args.models_dir, exist_ok=True)
-    ckpt = {
-        'model_state_dict': model_m.state_dict(),
-        'meta_scaler_mean': meta_scaler.mean_.tolist(),
-        'meta_scaler_scale': meta_scaler.scale_.tolist(),
-        'lstm_seq_len': seq_len,
-        'params': {
-            'meta_hidden': args.meta_hidden,
-            'meta_dropout': args.meta_dropout,
-            'meta_lr': args.meta_lr,
-            'meta_batch': args.meta_batch,
-            'meta_epochs': args.meta_epochs,
-            'threshold_metric': args.threshold_metric,
-        }
-    }
+    # Save logistic regression coefficients and scaler
     timestamp = time.strftime('%Y%m%d_%H%M%S')
-    model_path = os.path.join(args.models_dir, f"meta_fnn_{timestamp}.pt")
-    torch.save(ckpt, model_path)
+    model_path = os.path.join(args.models_dir, f"meta_logreg_{timestamp}.json")
+    coef = logreg.coef_.reshape(-1).tolist()
+    intercept = float(logreg.intercept_.reshape(-1)[0])
+    meta_artifact = {
+        'type': 'logistic_regression',
+        'feature_names': feature_names_meta,
+        'coef': coef,
+        'intercept': intercept,
+        'threshold_metric': args.threshold_metric,
+        'used_threshold': used_threshold,
+        'scaler_mean': meta_scaler.mean_.tolist(),
+        'scaler_scale': meta_scaler.scale_.tolist(),
+        'lstm_seq_len': seq_len,
+        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+    }
+    with open(model_path, 'w') as f:
+        json.dump(meta_artifact, f, indent=2)
 
     report = {
         'device': str(device),
@@ -755,11 +781,15 @@ def main() -> None:
             'test_start_date': '2022-01-01',
         },
         'meta_model': {
-            'hidden': args.meta_hidden,
-            'dropout': args.meta_dropout,
-            'epochs': meta_epochs,
-            'batch_size': args.meta_batch,
+            'type': 'logistic_regression',
+            'C': best_C if best_C is not None else args.logreg_C,
+            'threshold_metric': args.threshold_metric,
+            'used_threshold': used_threshold,
+            'coef': coef,
+            'intercept': intercept,
         },
+        'train_metrics_until_2021-12-31': train_metrics,
+        'val_metrics_until_2021-12-31': val_metrics,
         'test_metrics_since_' + args.test_start_date: test_metrics,
         'model_path': model_path,
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -775,7 +805,7 @@ def main() -> None:
     preds_df = pd.DataFrame({
         'Date': dates_te,
         'prob_meta': y_prob_test,
-        'pred_meta': (y_prob_test >= best_thr_test).astype(int),
+        'pred_meta': (y_prob_test >= used_threshold).astype(int),
         'target': yte_m,
         'prob_lstm': prob_lstm_te_aligned[:len(y_prob_test)],
         'prob_xgb': prob_xgb_te_aligned[:len(y_prob_test)],
@@ -792,8 +822,11 @@ def main() -> None:
         print(f"📄 Predictions saved to: {preds_csv_path}")
 
     # Plots
-    plot_training_history_meta(history, args.plots_dir, args.verbose)
     plot_meta_predictions_vs_price(dates_te, prices_te, yte_m[:len(y_prob_test)], y_prob_test, args.plots_dir, args.test_start_date, args.verbose)
+    plot_meta_learning_curves(Xtr_m_s, ytr_m, Xval_m_s, yval_m, chosen_C=best_C if best_C is not None else args.logreg_C, solver=args.logreg_solver, plots_dir=args.plots_dir, verbose=args.verbose)
+    plot_meta_roc_pr(yval_m, val_probs, yte_m[:len(y_prob_test)], y_prob_test, args.plots_dir, verbose=args.verbose)
+    plot_meta_threshold_sweep(yval_m, val_probs, yte_m[:len(y_prob_test)], y_prob_test, used_threshold, args.plots_dir, verbose=args.verbose)
+    plot_meta_calibration(yte_m[:len(y_prob_test)], y_prob_test, args.plots_dir, verbose=args.verbose)
 
 
 if __name__ == '__main__':
