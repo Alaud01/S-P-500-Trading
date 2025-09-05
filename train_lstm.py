@@ -1,3 +1,5 @@
+# run command: python train_lstm.py --verbose
+
 import os
 import json
 import math

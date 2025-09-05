@@ -1,4 +1,4 @@
-# run command: python train_xgboost.py --data data/final_dataset_for_modeling.csv --use_scaler --target_cleanup --target_horizon 14 --target_band 0.005 --auto_time_decay_years 4 --final_train_trailing_years 8 --verbose
+# run command: python train_xgboost.py --data data/final_dataset_for_modeling.csv --use_scaler --target_cleanup --verbose --threshold_metric accuracy
 
 import os
 import json
@@ -184,6 +184,40 @@ def evaluate(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> 
 	}
 
 
+def optimize_threshold(y_true: np.ndarray, y_prob: np.ndarray, metric: str = 'f1', 
+                      threshold_range: Tuple[float, float] = (0.1, 0.9), 
+                      n_thresholds: int = 50) -> Tuple[float, Dict[str, float]]:
+	"""
+	Optimize prediction threshold based on specified metric using training data.
+	
+	Args:
+		y_true: True binary labels
+		y_prob: Predicted probabilities
+		metric: Metric to optimize ('f1', 'accuracy', 'balanced_accuracy', 'precision', 'recall')
+		threshold_range: Range of thresholds to test (min, max)
+		n_thresholds: Number of threshold values to test
+	
+	Returns:
+		Tuple of (optimal_threshold, metrics_at_optimal_threshold)
+	"""
+	thresholds = np.linspace(threshold_range[0], threshold_range[1], n_thresholds)
+	best_score = -1.0
+	best_threshold = 0.5
+	best_metrics = {}
+	
+	# Calculate metrics for each threshold
+	for threshold in thresholds:
+		metrics = evaluate(y_true, y_prob, threshold)
+		score = metrics.get(metric, 0.0)
+		
+		if score > best_score:
+			best_score = score
+			best_threshold = threshold
+			best_metrics = metrics
+	
+	return best_threshold, best_metrics
+
+
 def random_search_xgb(X: np.ndarray,
 					y: np.ndarray,
 					feature_names: List[str],
@@ -231,7 +265,10 @@ def train_xgb_cv(X: np.ndarray,
 				y: np.ndarray,
 				feature_names: List[str],
 				params: XGBParams,
-				verbose: bool = True) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Any], float, Any, Optional[StandardScaler]]:
+				verbose: bool = True,
+				threshold_metric: str = 'f1',
+				threshold_range: Tuple[float, float] = (0.1, 0.9),
+				threshold_n_tests: int = 50) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Any], float, Any, Optional[StandardScaler]]:
 	# Compute class weight using first training fold to avoid future leakage
 	splits = time_series_cv_indices(n_rows=X.shape[0],
 							n_splits=params.cv_splits,
@@ -282,6 +319,26 @@ def train_xgb_cv(X: np.ndarray,
 			best_scaler = scaler
 			best_threshold = 0.5
 
+	# Optimize threshold using out-of-fold predictions
+	oof_mask = ~np.isnan(oof_prob) & ~np.isnan(oof_true)
+	if np.sum(oof_mask) > 0:
+		oof_prob_clean = oof_prob[oof_mask]
+		oof_true_clean = oof_true[oof_mask]
+		
+		# Optimize threshold based on specified metric
+		optimal_threshold, optimal_metrics = optimize_threshold(
+			oof_true_clean, oof_prob_clean, metric=threshold_metric, 
+			threshold_range=threshold_range, 
+			n_thresholds=threshold_n_tests
+		)
+		
+		if verbose:
+			metric_value = optimal_metrics.get(threshold_metric, 0.0)
+			print(f"  Threshold optimization: optimal={optimal_threshold:.3f}, {threshold_metric.upper()}={metric_value:.4f}")
+	else:
+		optimal_threshold = 0.5
+		optimal_metrics = {'f1': 0.0, 'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0}
+
 	# Final train/val metrics correspond to best fold's val performance
 	train_metrics = {}
 	val_metrics = {
@@ -300,9 +357,11 @@ def train_xgb_cv(X: np.ndarray,
 		'oof_prob': [None if np.isnan(v) else float(v) for v in oof_prob.tolist()],
 		'oof_true': [None if np.isnan(v) else int(v) for v in oof_true.tolist()],
 		'fold_histories': fold_histories,
+		'optimal_threshold': float(optimal_threshold),
+		'optimal_threshold_metrics': optimal_metrics,
 	}
 
-	return train_metrics, val_metrics, artifacts, best_threshold, best_model, best_scaler
+	return train_metrics, val_metrics, artifacts, optimal_threshold, best_model, best_scaler
 
 
 def _clone_xgb_with_params(src: XGBClassifier, override: Dict[str, Any] = None) -> XGBClassifier:
@@ -949,6 +1008,11 @@ def main() -> None:
 	parser.add_argument('--target_horizon', type=int, default=14, help='Forward horizon in days for target construction')
 	parser.add_argument('--target_band', type=float, default=0.005, help='Neutral band for forward return; |ret| <= band is ambiguous')
 	parser.add_argument('--keep_ambiguous', action='store_true', help='Keep rows within the neutral band instead of dropping')
+	# Threshold optimization controls
+	parser.add_argument('--threshold_metric', type=str, default='f1', choices=['f1', 'accuracy', 'balanced_accuracy', 'precision', 'recall'], help='Metric to optimize threshold on')
+	parser.add_argument('--threshold_range_min', type=float, default=0.1, help='Minimum threshold value for optimization')
+	parser.add_argument('--threshold_range_max', type=float, default=0.9, help='Maximum threshold value for optimization')
+	parser.add_argument('--threshold_n_tests', type=int, default=50, help='Number of threshold values to test during optimization')
 	args = parser.parse_args()
 
 	set_seed(args.seed)
@@ -1023,7 +1087,10 @@ def main() -> None:
 		y=y,
 		feature_names=feature_names,
 		params=params,
-		verbose=args.verbose
+		verbose=args.verbose,
+		threshold_metric=args.threshold_metric,
+		threshold_range=(args.threshold_range_min, args.threshold_range_max),
+		threshold_n_tests=args.threshold_n_tests
 	)
 
 	# Derive OOF predictions for robust threshold selection and optional calibration
@@ -1031,7 +1098,16 @@ def main() -> None:
 	oof_true_list = artifacts.get('oof_true', [])
 	oof_mask = [p is not None and t is not None for p, t in zip(oof_prob_list, oof_true_list)]
 
-	chosen_thr = 0.5
+	# Use the optimized threshold from CV process
+	chosen_thr = artifacts.get('optimal_threshold', 0.5)
+	optimal_threshold_metrics = artifacts.get('optimal_threshold_metrics', {})
+	
+	if args.verbose:
+		print(f"Using optimized threshold: {chosen_thr:.3f}")
+		print(f"Optimized threshold metrics: F1={optimal_threshold_metrics.get('f1', 0.0):.4f}, "
+			  f"Accuracy={optimal_threshold_metrics.get('accuracy', 0.0):.4f}, "
+			  f"Precision={optimal_threshold_metrics.get('precision', 0.0):.4f}, "
+			  f"Recall={optimal_threshold_metrics.get('recall', 0.0):.4f}")
 
 	calibrator = None
 	if params.calibrate and any(oof_mask):
@@ -1116,6 +1192,11 @@ def main() -> None:
 		'cv': val_metrics,
 		'best_threshold_cv': best_thr_cv,
 		'oof_threshold': chosen_thr,
+		'threshold_optimization': {
+			'optimal_threshold': float(chosen_thr),
+			'optimization_metric': args.threshold_metric,
+			'optimized_metrics': optimal_threshold_metrics,
+		},
 		'holdout': holdout_metrics,
 		'params': asdict(params),
 		'feature_names': feature_names,
