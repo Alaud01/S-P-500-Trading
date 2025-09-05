@@ -229,13 +229,10 @@ def train_one_fold(X: np.ndarray,
                    val_idx_eff: np.ndarray,
                    params: Dict[str, Any],
                    device: torch.device) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, List[float]], float]:
-    # Effective index t corresponds to sequence index s = t - (seq_len - 1)
-    def eff_to_seq_idx(eff_idx: np.ndarray) -> np.ndarray:
-        return eff_idx - (seq_len - 1)
-
-    # Fit scaler on rows up to last training effective index (inclusive)
-    last_train_eff = int(train_idx_eff.max())
-    scaler_rows_end = last_train_eff + 1
+    # The CV splits are already expressed in sequence-index space [0..n_effective-1].
+    # Fit scaler only on raw rows covered by the training sequences (up to the tail row of the last train sequence)
+    last_train_seq = int(train_idx_eff.max())
+    scaler_rows_end = last_train_seq + seq_len  # include tail row
     scaler = StandardScaler()
     scaler.fit(X[:scaler_rows_end])
     X_scaled = scaler.transform(X)
@@ -243,8 +240,9 @@ def train_one_fold(X: np.ndarray,
     # Build sequences from scaled features
     X_seq, y_seq = build_sequences(X_scaled, y, seq_len)
 
-    train_seq_idx = eff_to_seq_idx(train_idx_eff)
-    val_seq_idx = eff_to_seq_idx(val_idx_eff)
+    # Use the provided indices directly as sequence indices
+    train_seq_idx = train_idx_eff
+    val_seq_idx = val_idx_eff
 
     train_ds = SequenceDataset(X_seq, y_seq, train_seq_idx)
     val_ds = SequenceDataset(X_seq, y_seq, val_seq_idx)
@@ -340,11 +338,19 @@ def train_one_fold(X: np.ndarray,
 
         # Collect validation probabilities to find best threshold
         val_probs, val_labels = collect_probs_and_labels(model, val_loader, device)
-        tuned_thr, tuned_score = find_best_threshold(val_probs, val_labels, metric=params.get('threshold_metric', 'f1'))
-        current_val_metrics = evaluate(model, val_loader, device, threshold=tuned_thr)
-        val_metrics = current_val_metrics
-        if val_metrics['f1'] >= tuned_score - 1e-9:
+        if params.get('fixed_threshold') is not None:
+            # Use fixed threshold, skip tuning
+            tuned_thr = params['fixed_threshold']
+            current_val_metrics = evaluate(model, val_loader, device, threshold=tuned_thr)
+            val_metrics = current_val_metrics
             best_threshold = tuned_thr
+        else:
+            # Tune threshold as usual
+            tuned_thr, tuned_score = find_best_threshold(val_probs, val_labels, metric=params.get('threshold_metric', 'f1'))
+            current_val_metrics = evaluate(model, val_loader, device, threshold=tuned_thr)
+            val_metrics = current_val_metrics
+            if val_metrics['f1'] >= tuned_score - 1e-9:
+                best_threshold = tuned_thr
         
         # Store history
         history['train_loss'].append(avg_train_loss)
@@ -640,6 +646,33 @@ def retrain_full_and_save(X: np.ndarray,
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    # Optimize threshold on full dataset if not fixed
+    if params.get('fixed_threshold') is not None:
+        best_threshold = params['fixed_threshold']
+        if params['verbose']:
+            print(f"  Using fixed threshold: {best_threshold:.3f}")
+    else:
+        # Use a validation split for threshold optimization
+        val_size = min(500, len(ds) // 5)  # Use 20% or max 500 samples for validation
+        if val_size > 50:  # Only if we have enough data
+            # Create a simple train/val split for threshold optimization
+            val_indices = np.random.choice(len(ds), val_size, replace=False)
+            train_indices = np.setdiff1d(np.arange(len(ds)), val_indices)
+            
+            val_ds = SequenceDataset(X_seq, y_seq, val_indices)
+            val_loader = DataLoader(val_ds, batch_size=params['batch_size'], shuffle=False)
+            
+            # Get validation predictions
+            val_probs, val_labels = collect_probs_and_labels(model, val_loader, device)
+            best_threshold, _ = find_best_threshold(val_probs, val_labels, metric=params.get('threshold_metric', 'f1'))
+            
+            if params['verbose']:
+                print(f"  Optimized threshold on validation split: {best_threshold:.3f}")
+        else:
+            best_threshold = 0.5
+            if params['verbose']:
+                print(f"  Insufficient data for threshold optimization, using default: {best_threshold:.3f}")
+
     os.makedirs(models_dir, exist_ok=True)
     ckpt = {
         'model_state_dict': model.state_dict(),
@@ -648,6 +681,7 @@ def retrain_full_and_save(X: np.ndarray,
         'feature_names': feature_names,
         'seq_len': seq_len,
         'params': params,
+        'best_threshold': float(best_threshold),
     }
     timestamp = time.strftime('%Y%m%d_%H%M%S')
     save_path = os.path.join(models_dir, f"lstm_best_{timestamp}.pt")
@@ -821,7 +855,7 @@ def plot_test_predictions_vs_price(model_path: str,
         
     print("  📊 Generating test set predictions vs price visualization...")
     
-    # Load the trained model
+    # Load the trained model (prefer holdout checkpoint with scaler/threshold)
     checkpoint = torch.load(model_path, map_location=device)
     model = LSTMClassifier(
         input_size=len(checkpoint['feature_names']),
@@ -860,13 +894,19 @@ def plot_test_predictions_vs_price(model_path: str,
         test_dates = np.arange(len(X_test))
         test_prices = None
     
-    # Scale data using only training data (no data leakage)
-    scaler = StandardScaler().fit(X_train)
+    # Scale test data using scaler stored in checkpoint (no refit)
+    scaler = StandardScaler()
+    scaler.mean_ = np.array(checkpoint['scaler_mean'])
+    scaler.scale_ = np.array(checkpoint['scaler_scale'])
     X_test_scaled = scaler.transform(X_test)
+
+    # Also compute training-set accuracy for overfitting check using the same checkpoint scaler
+    X_train_scaled = scaler.transform(X_train)
     
-    # Build sequences for test set
+    # Build sequences for test and train sets
     seq_len = checkpoint['seq_len']
     X_test_seq, y_test_seq = build_sequences(X_test_scaled, y_test, seq_len)
+    X_train_seq, y_train_seq = build_sequences(X_train_scaled, y_train, seq_len)
     
     # Get predictions for test set
     model.eval()
@@ -880,6 +920,17 @@ def plot_test_predictions_vs_price(model_path: str,
             predictions.extend(probs.cpu().numpy())
     
     predictions = np.array(predictions)
+    
+    # Compute training predictions for overfitting comparison
+    train_predictions = []
+    with torch.no_grad():
+        for i in range(0, len(X_train_seq), 128):
+            batch = X_train_seq[i:i+128]
+            batch_tensor = torch.from_numpy(batch).float().to(device)
+            logits = model(batch_tensor)
+            probs = torch.sigmoid(logits)
+            train_predictions.extend(probs.cpu().numpy())
+    train_predictions = np.array(train_predictions)
     
     # Adjust dates and prices for sequence offset
     if test_prices is not None:
@@ -910,7 +961,8 @@ def plot_test_predictions_vs_price(model_path: str,
     
     # Plot 2: Model Predictions (Probability)
     ax2.plot(test_dates, predictions, color='green', linewidth=1.5, alpha=0.8)
-    ax2.axhline(y=0.5, color='red', linestyle='--', alpha=0.7, label='Decision Threshold (0.5)')
+    plot_thr = float(checkpoint.get('best_threshold', 0.5))
+    ax2.axhline(y=plot_thr, color='red', linestyle='--', alpha=0.7, label=f'Decision Threshold ({plot_thr:.2f})')
     ax2.set_title('LSTM Prediction Probability (14-day forward)', fontweight='bold')
     ax2.set_ylabel('Probability', fontweight='bold')
     ax2.set_ylim(0, 1)
@@ -918,8 +970,10 @@ def plot_test_predictions_vs_price(model_path: str,
     ax2.legend()
     
     # Plot 3: Predictions vs Actual (Binary)
-    # Convert predictions to binary using 0.5 threshold
-    pred_binary = (predictions >= 0.5).astype(int)
+    # Convert predictions to binary using checkpoint threshold (if available)
+    pred_binary = (predictions >= plot_thr).astype(int)
+    train_pred_binary = (train_predictions >= plot_thr).astype(int)
+    train_actual_binary = y_train_seq
     actual_binary = y_test_seq
     
     # Create scatter plot
@@ -969,6 +1023,24 @@ def plot_test_predictions_vs_price(model_path: str,
     plot_path = os.path.join(plots_dir, 'lstm_test_predictions_vs_price.png')
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     print(f"  📈 Test set predictions vs price plot saved to: {plot_path}")
+    plt.show()
+
+    # Additional plot: Training vs Test accuracy comparison
+    fig_acc, ax_acc = plt.subplots(figsize=(8, 5))
+    train_acc = float(np.mean(train_pred_binary == train_actual_binary)) if len(train_actual_binary) == len(train_pred_binary) else float('nan')
+    test_acc = float(np.mean(pred_binary == actual_binary))
+    ax_acc.bar(['Train', 'Test'], [train_acc, test_acc], color=['#4C78A8', '#F58518'], alpha=0.8)
+    ax_acc.set_ylim(0, 1)
+    ax_acc.set_ylabel('Accuracy')
+    ax_acc.set_title('Training vs Test Accuracy')
+    for x, v in zip(['Train', 'Test'], [train_acc, test_acc]):
+        ax_acc.text(x, v + 0.02, f'{v:.3f}', ha='center', va='bottom', fontweight='bold')
+    plt.tight_layout()
+    os.makedirs(plots_dir, exist_ok=True)
+    overfit_plot_path = os.path.join(plots_dir, 'lstm_training_vs_test_accuracy.png')
+    plt.savefig(overfit_plot_path, dpi=300, bbox_inches='tight')
+    if verbose:
+        print(f"  📊 Training vs test accuracy plot saved to: {overfit_plot_path}")
     plt.show()
     
     # Create additional detailed analysis plot for test set
@@ -1037,22 +1109,23 @@ def main():
     parser.add_argument('--seq-len', type=int, default=60)
     parser.add_argument('--hidden-size', type=int, default=64)
     parser.add_argument('--num-layers', type=int, default=2)
-    parser.add_argument('--dropout', type=float, default=0.2)
+    parser.add_argument('--dropout', type=float, default=0.3)
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--epochs', type=int, default=75)
-    parser.add_argument('--patience', type=int, default=15)
+    parser.add_argument('--patience', type=int, default=10)
     parser.add_argument('--lr', type=float, default=2e-4)
-    parser.add_argument('--weight-decay', type=float, default=1e-5)
+    parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument('--n-splits', type=int, default=5)
     parser.add_argument('--val-window', type=int, default=180)
     parser.add_argument('--gap', type=int, default=14)
     parser.add_argument('--min-train-window', type=int, default=365)
     parser.add_argument('--bidirectional', action='store_true')
-    parser.add_argument('--use-scheduler', action='store_true')
+    parser.add_argument('--use-scheduler', action='store_true', default=True)
     parser.add_argument('--scheduler-factor', type=float, default=0.7)
     parser.add_argument('--scheduler-patience', type=int, default=5)
     parser.add_argument('--min-lr', type=float, default=1e-6)
     parser.add_argument('--threshold-metric', type=str, default='f1', choices=['f1', 'youden'])
+    parser.add_argument('--fixed-threshold', type=float, default=None, help='Fixed decision threshold (e.g., 0.5). If set, disables threshold tuning.')
     parser.add_argument('--test-start-date', type=str, default='2022-01-01')
     parser.add_argument('--search-trials', type=int, default=0, help='Number of random trials. 0 disables search')
     parser.add_argument('--seed', type=int, default=42)
@@ -1123,6 +1196,7 @@ def main():
         'scheduler_patience': args.scheduler_patience,
         'min_lr': args.min_lr,
         'threshold_metric': args.threshold_metric,
+        'fixed_threshold': args.fixed_threshold,
     }
 
     cv_cfg = {
@@ -1223,104 +1297,153 @@ def main():
 
     # Holdout evaluation from a specific date (default: 2022-01-01)
     test_start_date = pd.to_datetime(args.test_start_date)
+    holdout_model_path = None
     if 'Date' in df.columns:
         test_mask = df['Date'] >= test_start_date
         if test_mask.any() and (~test_mask).any():
-            X_train_df = X_df[~test_mask]
-            y_train = y[~test_mask]
+            X_pre_df = X_df[~test_mask]
+            y_pre = y[~test_mask]
             X_test_df = X_df[test_mask]
             y_test = y[test_mask]
 
             if args.verbose:
                 print(f"{'='*60}")
-                print("HOLDOUT EVALUATION")
+                print("HOLDOUT EVALUATION (no test peeking)")
                 print(f"{'='*60}")
-                print(f"Train rows: {X_train_df.shape[0]} | Test rows (since {args.test_start_date}): {X_test_df.shape[0]}")
+                print(f"Pre-test rows: {X_pre_df.shape[0]} | Test rows (since {args.test_start_date}): {X_test_df.shape[0]}")
                 print()
 
-            # Scale on train only
-            scaler_holdout = StandardScaler().fit(X_train_df.values.astype(np.float32))
-            X_train_scaled = scaler_holdout.transform(X_train_df.values.astype(np.float32))
-            X_test_scaled = scaler_holdout.transform(X_test_df.values.astype(np.float32))
-
             seq_len = final_params['seq_len']
-            X_train_seq, y_train_seq = build_sequences(X_train_scaled, y_train, seq_len)
-            X_test_seq, y_test_seq = build_sequences(X_test_scaled, y_test, seq_len)
+            X_pre = X_pre_df.values.astype(np.float32)
+            n_effective_pre = X_pre.shape[0] - seq_len + 1
+            holdout_metrics = {}
+            if n_effective_pre > max(10, args.gap + 1):
+                # Validation window within pre-test data (time-ordered)
+                val_window_holdout = min(args.val_window, max(1, n_effective_pre // 5))
+                val_start_seq = n_effective_pre - val_window_holdout
+                train_end_seq = max(0, val_start_seq - args.gap)
+                if train_end_seq <= 0:
+                    train_end_seq = val_start_seq
 
-            train_ds_holdout = SequenceDataset(X_train_seq, y_train_seq, np.arange(len(y_train_seq)))
-            test_ds_holdout = SequenceDataset(X_test_seq, y_test_seq, np.arange(len(y_test_seq)))
-            train_loader_holdout = DataLoader(train_ds_holdout, batch_size=final_params['batch_size'], shuffle=True)
-            test_loader_holdout = DataLoader(test_ds_holdout, batch_size=final_params['batch_size'], shuffle=False)
+                train_seq_idx = np.arange(0, train_end_seq)
+                val_seq_idx = np.arange(val_start_seq, n_effective_pre)
+                if len(train_seq_idx) > 0 and len(val_seq_idx) > 0:
+                    # Fit scaler on raw rows up to tail of last training sequence
+                    scaler_rows_end = int(train_seq_idx.max()) + seq_len
+                    scaler_holdout = StandardScaler().fit(X_pre[:scaler_rows_end])
 
-            # Train fresh model on pre-test data
-            holdout_model = LSTMClassifier(
-                input_size=X_train_df.shape[1],
-                hidden_size=final_params['hidden_size'],
-                num_layers=final_params['num_layers'],
-                dropout=final_params['dropout'],
-                bidirectional=final_params.get('bidirectional', False)
-            ).to(device)
+                    X_pre_scaled = scaler_holdout.transform(X_pre)
+                    X_test_scaled = scaler_holdout.transform(X_test_df.values.astype(np.float32))
 
-            pos_weight_value = compute_class_pos_weight(y_train_seq)
-            criterion_holdout = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_value], dtype=torch.float32, device=device))
-            optimizer_holdout = torch.optim.Adam(holdout_model.parameters(), lr=final_params['lr'], weight_decay=final_params['weight_decay'])
-            scheduler_holdout = None
-            if final_params.get('use_scheduler', False):
-                scheduler_holdout = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer_holdout, mode='max', factor=final_params.get('scheduler_factor', 0.5),
-                    patience=final_params.get('scheduler_patience', 2), min_lr=final_params.get('min_lr', 1e-5)
-                )
+                    X_pre_seq, y_pre_seq = build_sequences(X_pre_scaled, y_pre, seq_len)
+                    X_test_seq, y_test_seq = build_sequences(X_test_scaled, y_test, seq_len)
 
-            best_auc = -1.0
-            best_state = None
-            best_thr_holdout = 0.5
-            epochs_no_improve = 0
-            for epoch in range(final_params['epochs']):
-                holdout_model.train()
-                total_loss = 0.0
-                for xb, yb in train_loader_holdout:
-                    xb = xb.to(device)
-                    yb = yb.float().to(device)
-                    optimizer_holdout.zero_grad()
-                    logits = holdout_model(xb.float())
-                    loss = criterion_holdout(logits, yb)
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(holdout_model.parameters(), max_norm=1.0)
-                    optimizer_holdout.step()
-                    total_loss += loss.item() * xb.size(0)
+                    train_ds_holdout = SequenceDataset(X_pre_seq, y_pre_seq, train_seq_idx)
+                    val_ds_holdout = SequenceDataset(X_pre_seq, y_pre_seq, val_seq_idx)
+                    test_ds_holdout = SequenceDataset(X_test_seq, y_test_seq, np.arange(len(y_test_seq)))
 
-                avg_loss = total_loss / len(train_loader_holdout.dataset)
-                # Tune threshold on train
-                train_probs, train_labels = collect_probs_and_labels(holdout_model, train_loader_holdout, device)
-                tuned_thr, _ = find_best_threshold(train_probs, train_labels, metric=final_params.get('threshold_metric', 'f1'))
-                val_metrics = evaluate(holdout_model, test_loader_holdout, device, threshold=tuned_thr)
-                if scheduler_holdout is not None:
-                    scheduler_holdout.step(val_metrics['auc'])
-                is_improve = val_metrics['auc'] > best_auc
-                if is_improve:
-                    best_auc = val_metrics['auc']
-                    best_state = holdout_model.state_dict()
-                    best_thr_holdout = tuned_thr
+                    train_loader_holdout = DataLoader(train_ds_holdout, batch_size=final_params['batch_size'], shuffle=True)
+                    val_loader_holdout = DataLoader(val_ds_holdout, batch_size=final_params['batch_size'], shuffle=False)
+                    test_loader_holdout = DataLoader(test_ds_holdout, batch_size=final_params['batch_size'], shuffle=False)
+
+                    # Train model on pre-test train, early-stop on pre-test val
+                    holdout_model = LSTMClassifier(
+                        input_size=X_pre_df.shape[1],
+                        hidden_size=final_params['hidden_size'],
+                        num_layers=final_params['num_layers'],
+                        dropout=final_params['dropout'],
+                        bidirectional=final_params.get('bidirectional', False)
+                    ).to(device)
+
+                    pos_weight_value = compute_class_pos_weight(y_pre_seq[train_seq_idx])
+                    criterion_holdout = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_value], dtype=torch.float32, device=device))
+                    optimizer_holdout = torch.optim.Adam(holdout_model.parameters(), lr=final_params['lr'], weight_decay=final_params['weight_decay'])
+                    scheduler_holdout = None
+                    if final_params.get('use_scheduler', False):
+                        scheduler_holdout = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                            optimizer_holdout, mode='max', factor=final_params.get('scheduler_factor', 0.5),
+                            patience=final_params.get('scheduler_patience', 2), min_lr=final_params.get('min_lr', 1e-5)
+                        )
+
+                    best_val_auc = -1.0
+                    best_state = None
+                    best_thr_val = 0.5
                     epochs_no_improve = 0
-                else:
-                    epochs_no_improve += 1
-                if args.verbose and (epoch % max(1, args.log_every) == 0 or epoch == final_params['epochs'] - 1):
-                    print(f"    [Holdout] Epoch {epoch+1:3d}/{final_params['epochs']} | Loss: {avg_loss:.4f} | Val AUC: {val_metrics['auc']:.4f} | Thr: {tuned_thr:.2f} | No Improve: {epochs_no_improve}/{final_params['patience']}")
-                if epochs_no_improve >= final_params['patience']:
-                    if args.verbose:
-                        print("    [Holdout] Early stopping")
-                    break
+                    for epoch in range(final_params['epochs']):
+                        holdout_model.train()
+                        for xb, yb in train_loader_holdout:
+                            xb = xb.to(device)
+                            yb = yb.float().to(device)
+                            optimizer_holdout.zero_grad()
+                            logits = holdout_model(xb.float())
+                            loss = criterion_holdout(logits, yb)
+                            loss.backward()
+                            nn.utils.clip_grad_norm_(holdout_model.parameters(), max_norm=1.0)
+                            optimizer_holdout.step()
 
-            if best_state is not None:
-                holdout_model.load_state_dict(best_state)
-            holdout_metrics = evaluate(holdout_model, test_loader_holdout, device, threshold=best_thr_holdout)
+                        # Evaluate on pre-test validation and tune threshold on that
+                        val_probs, val_labels = collect_probs_and_labels(holdout_model, val_loader_holdout, device)
+                        if final_params.get('fixed_threshold') is not None:
+                            # Use fixed threshold, skip tuning
+                            tuned_thr = final_params['fixed_threshold']
+                        else:
+                            # Tune threshold as usual
+                            tuned_thr, _ = find_best_threshold(val_probs, val_labels, metric=final_params.get('threshold_metric', 'f1'))
+                        val_metrics = evaluate(holdout_model, val_loader_holdout, device, threshold=tuned_thr)
+                        if scheduler_holdout is not None:
+                            scheduler_holdout.step(val_metrics['auc'])
+                        if val_metrics['auc'] > best_val_auc:
+                            best_val_auc = val_metrics['auc']
+                            best_state = holdout_model.state_dict()
+                            best_thr_val = tuned_thr
+                            epochs_no_improve = 0
+                        else:
+                            epochs_no_improve += 1
+                        if args.verbose and (epoch % max(1, args.log_every) == 0 or epoch == final_params['epochs'] - 1):
+                            print(f"    [Holdout] Epoch {epoch+1:3d}/{final_params['epochs']} | Val AUC: {val_metrics['auc']:.4f} | Thr: {tuned_thr:.2f} | No Improve: {epochs_no_improve}/{final_params['patience']}")
+                        if epochs_no_improve >= final_params['patience']:
+                            if args.verbose:
+                                print("    [Holdout] Early stopping")
+                            break
+
+                    if best_state is not None:
+                        holdout_model.load_state_dict(best_state)
+
+                    # Final evaluation on TEST once using best validation threshold
+                    holdout_metrics = evaluate(holdout_model, test_loader_holdout, device, threshold=best_thr_val)
+
+                    # Save holdout checkpoint
+                    os.makedirs(args.models_dir, exist_ok=True)
+                    ckpt_holdout = {
+                        'model_state_dict': holdout_model.state_dict(),
+                        'scaler_mean': scaler_holdout.mean_.tolist(),
+                        'scaler_scale': scaler_holdout.scale_.tolist(),
+                        'feature_names': feature_names,
+                        'seq_len': seq_len,
+                        'params': final_params,
+                        'best_threshold': float(best_thr_val)
+                    }
+                    timestamp_h = time.strftime('%Y%m%d_%H%M%S')
+                    holdout_model_path = os.path.join(args.models_dir, f"lstm_holdout_{timestamp_h}.pt")
+                    torch.save(ckpt_holdout, holdout_model_path)
+
+                    if args.verbose:
+                        print(f"    💾 Holdout model saved to: {holdout_model_path}")
+                        print(f"    📊 Holdout test metrics (since {args.test_start_date}): {json.dumps(holdout_metrics, indent=2)}")
+            else:
+                holdout_metrics = {}
         else:
             holdout_metrics = {}
     else:
         holdout_metrics = {}
 
-    # Retrain on full data with final params and save
-    model_path = retrain_full_and_save(X, y, feature_names, final_params, device, args.models_dir)
+    # Prefer holdout model if available to avoid full-data overfitting; otherwise retrain on full data
+    if 'holdout_model_path' in locals() and holdout_model_path is not None:
+        model_path = holdout_model_path
+        if args.verbose:
+            print("Using holdout model for downstream use; skipping full-data retrain.")
+    else:
+        model_path = retrain_full_and_save(X, y, feature_names, final_params, device, args.models_dir)
 
     # Save report
     report = {
@@ -1328,6 +1451,7 @@ def main():
         'final_params': final_params,
         'models_dir': args.models_dir,
         'model_path': model_path,
+        'using_holdout_model': bool('holdout_model_path' in locals() and holdout_model_path is not None),
         'dataset_info': {
             'shape': X.shape,
             'n_features': len(feature_names),
@@ -1348,6 +1472,8 @@ def main():
         report['best_cv_metrics'] = best_cv_metrics
     if holdout_metrics:
         report['holdout_metrics_since_' + args.test_start_date] = holdout_metrics
+    if 'holdout_model_path' in locals() and holdout_model_path is not None:
+        report['holdout_model_path'] = holdout_model_path
         
     os.makedirs(args.models_dir, exist_ok=True)
     report_path = os.path.join(args.models_dir, 'lstm_report.json')
@@ -1367,7 +1493,8 @@ def main():
         print(f"{'='*60}")
     
     # Generate test set predictions vs price visualization
-    plot_test_predictions_vs_price(model_path, args.data_csv, args.models_dir, args.plots_dir, args.test_start_date, device, args.verbose)
+    model_for_plot = holdout_model_path if ('holdout_model_path' in locals() and holdout_model_path is not None) else model_path
+    plot_test_predictions_vs_price(model_for_plot, args.data_csv, args.models_dir, args.plots_dir, args.test_start_date, device, args.verbose)
 
 
 if __name__ == '__main__':

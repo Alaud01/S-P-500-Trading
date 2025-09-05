@@ -4,23 +4,25 @@
     "seq_len": 60,
     "hidden_size": 64,
     "num_layers": 2,
-    "dropout": 0.2,
+    "dropout": 0.3,
     "batch_size": 128,
     "epochs": 75,
-    "patience": 15,
+    "patience": 10,
     "lr": 0.0002,
-    "weight_decay": 1e-05,
+    "weight_decay": 0.0001,
     "verbose": true,
     "log_every": 1,
     "bidirectional": false,
-    "use_scheduler": false,
+    "use_scheduler": true,
     "scheduler_factor": 0.7,
     "scheduler_patience": 5,
     "min_lr": 1e-06,
-    "threshold_metric": "f1"
+    "threshold_metric": "f1",
+    "fixed_threshold": null
   },
   "models_dir": "models/lstm",
-  "model_path": "models/lstm/lstm_best_20250825_222850.pt",
+  "model_path": "models/lstm/lstm_holdout_20250904_185922.pt",
+  "using_holdout_model": true,
   "dataset_info": {
     "shape": [
       5878,
@@ -85,24 +87,25 @@
     "positive_class_ratio": 0.6241919020074855
   },
   "training_info": {
-    "timestamp": "2025-08-25 22:28:50",
+    "timestamp": "2025-09-04 18:59:22",
     "seed": 42,
     "smoke_test": false
   },
   "cv_metrics": {
-    "auc": 0.5080347700385202,
-    "accuracy": 0.6444444444444445,
-    "balanced_accuracy": 0.5205077152812344,
-    "precision": 0.6335632183908045,
-    "recall": 0.9512195121951219,
-    "f1": 0.7593401152494463
+    "auc": 0.5335493725054388,
+    "accuracy": 0.671111111111111,
+    "balanced_accuracy": 0.5177862538458007,
+    "precision": 0.6750032463316453,
+    "recall": 0.9706232492997199,
+    "f1": 0.793566882254424
   },
   "holdout_metrics_since_2022-01-01": {
-    "auc": 0.565924499229584,
-    "accuracy": 0.6068027210884354,
-    "balanced_accuracy": 0.5168721109399076,
-    "precision": 0.6070921985815603,
-    "recall": 0.9727272727272728,
-    "f1": 0.7475982532751092
-  }
+    "auc": 0.6404237288135592,
+    "accuracy": 0.6408163265306123,
+    "balanced_accuracy": 0.5564522342064715,
+    "precision": 0.6275362318840579,
+    "recall": 0.9840909090909091,
+    "f1": 0.7663716814159292
+  },
+  "holdout_model_path": "models/lstm/lstm_holdout_20250904_185922.pt"
 }
