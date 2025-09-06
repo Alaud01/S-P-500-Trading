@@ -266,6 +266,50 @@ def predict_xgb_for_all(
     return dates, prices, prob_pos, y.astype(int), feature_names
 
 
+# ---- Linear model (Logistic Regression on raw features) ----
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def predict_linear_for_all(
+    model_path: str,
+    df_full: pd.DataFrame,
+    X_df: pd.DataFrame,
+    y: np.ndarray,
+) -> Tuple[np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray, List[str]]:
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Linear model JSON not found at: {model_path}")
+    art = _load_json(model_path)
+    feature_names: List[str] = art.get('feature_names', list(X_df.columns))
+    coef_list = art.get('coef', [])
+    if coef_list is None or len(coef_list) == 0:
+        raise ValueError(f"Linear model artifact at {model_path} has empty coefficients. Ensure train_linear.py completed successfully and pass the linear_logreg_*.json, not the report file.")
+    coef = np.asarray(coef_list, dtype=np.float32).reshape(-1)
+    intercept = float(art.get('intercept', 0.0))
+    scaler_mean = np.asarray(art.get('scaler_mean', np.zeros(len(feature_names))), dtype=np.float32)
+    scaler_scale = np.asarray(art.get('scaler_scale', np.ones(len(feature_names))), dtype=np.float32)
+
+    # Ensure order and presence
+    missing_feats = [f for f in feature_names if f not in X_df.columns]
+    if missing_feats:
+        raise ValueError(f"Linear model expects features missing in dataset: {missing_feats}")
+    if len(coef) != len(feature_names):
+        raise ValueError(f"Linear model coefficient length {len(coef)} does not match feature_names length {len(feature_names)} in {model_path}.")
+    X_all = X_df[feature_names].values.astype(np.float32)
+    X_scaled = (X_all - scaler_mean) / np.where(scaler_scale == 0.0, 1.0, scaler_scale)
+    logits = X_scaled.dot(coef) + intercept
+    prob_pos = _sigmoid(logits).astype(np.float32)
+
+    if 'Date' in df_full.columns:
+        dates = df_full['Date'].values
+        prices = df_full['Close'].values if 'Close' in df_full.columns else None
+    else:
+        dates = np.arange(X_all.shape[0])
+        prices = None
+    return dates, prices, prob_pos, y.astype(int), feature_names
+
+
 # ---- Meta-model (Logistic Regression) ----
 
 
@@ -410,6 +454,7 @@ def main() -> None:
     parser.add_argument('--lstm-model-path', type=str, default='')
     parser.add_argument('--xgb-model-path', type=str, default='')
     parser.add_argument('--xgb-report-path', type=str, default='')
+    parser.add_argument('--linear-model-path', type=str, default='')
     parser.add_argument('--meta-holdout-train-ratio', type=float, default=0.7)
     # Logistic Regression params
     parser.add_argument('--logreg-C', type=float, default=1.0)
@@ -525,6 +570,26 @@ def main() -> None:
         X_df=X_df,
         y=y,
     )
+    # Determine latest Linear model if not provided
+    linear_model_path = args.linear_model_path
+    if not linear_model_path:
+        linear_dir = os.path.join('models', 'linear')
+        if os.path.isdir(linear_dir):
+            candidates = [os.path.join(linear_dir, f) for f in os.listdir(linear_dir) if f.endswith('.json') and 'linear_logreg_' in f]
+            linear_model_path = max(candidates, key=os.path.getmtime) if candidates else ''
+        else:
+            linear_model_path = ''
+    if not linear_model_path or not os.path.exists(linear_model_path):
+        raise FileNotFoundError("Linear model (.json) not found in models/linear. Provide --linear-model-path or train linear first.")
+
+    # Predict Linear probabilities for all rows
+    dates_lin_all, _, probs_lin_all, y_lin_all, _ = predict_linear_for_all(
+        model_path=linear_model_path,
+        df_full=df,
+        X_df=X_df,
+        y=y,
+    )
+
     # Split XGB predictions to CV and Test by date
     xgb_all_df = pd.DataFrame({'Date': dates_xgb_all, 'prob_xgb': probs_xgb_all})
     xgb_all_df = xgb_all_df.sort_values('Date')
@@ -535,9 +600,17 @@ def main() -> None:
     lstm_cv_df = pd.DataFrame({'Date': dates_lstm_cv, 'prob_lstm': probs_lstm_cv, 'target': y_lstm_cv})
     lstm_te_df = pd.DataFrame({'Date': dates_lstm_te, 'prob_lstm': probs_lstm_te, 'target': y_lstm_te})
 
-    # Merge on Date to align both base predictors (CV and Test separately)
-    merged_cv = pd.merge(lstm_cv_df, xgb_cv_df[['Date', 'prob_xgb']], on='Date', how='inner').sort_values('Date').reset_index(drop=True)
-    merged_te = pd.merge(lstm_te_df, xgb_te_df[['Date', 'prob_xgb']], on='Date', how='inner').sort_values('Date').reset_index(drop=True)
+    # Build Linear dataframes and split to CV and Test
+    lin_all_df = pd.DataFrame({'Date': dates_lin_all, 'prob_linear': probs_lin_all})
+    lin_cv_df = lin_all_df[lin_all_df['Date'] <= cv_end].copy()
+    lin_te_df = lin_all_df[lin_all_df['Date'] >= test_start].copy()
+
+    # Merge on Date to align base predictors (CV and Test separately)
+    merged_cv = pd.merge(lstm_cv_df, xgb_cv_df[['Date', 'prob_xgb']], on='Date', how='inner')
+    merged_cv = pd.merge(merged_cv, lin_cv_df[['Date', 'prob_linear']], on='Date', how='inner').sort_values('Date').reset_index(drop=True)
+
+    merged_te = pd.merge(lstm_te_df, xgb_te_df[['Date', 'prob_xgb']], on='Date', how='inner')
+    merged_te = pd.merge(merged_te, lin_te_df[['Date', 'prob_linear']], on='Date', how='inner').sort_values('Date').reset_index(drop=True)
     if merged_cv.empty or merged_te.empty:
         raise ValueError("No overlapping dates between LSTM predictions and XGBoost holdout predictions. Ensure both are generated for the same period.")
 
@@ -557,12 +630,12 @@ def main() -> None:
     merged_cv = add_close(merged_cv)
     merged_te = add_close(merged_te)
 
-    # Prepare meta features/labels using only base model probabilities (no Close)
-    X_meta_cv = np.column_stack([merged_cv['prob_lstm'].values, merged_cv['prob_xgb'].values]).astype(np.float32)
+    # Prepare meta features/labels using base model probabilities (no Close)
+    X_meta_cv = np.column_stack([merged_cv['prob_lstm'].values, merged_cv['prob_xgb'].values, merged_cv['prob_linear'].values]).astype(np.float32)
     y_meta_cv = merged_cv['target'].values.astype(int)
     dates_meta_cv = merged_cv['Date'].values
 
-    X_meta_te = np.column_stack([merged_te['prob_lstm'].values, merged_te['prob_xgb'].values]).astype(np.float32)
+    X_meta_te = np.column_stack([merged_te['prob_lstm'].values, merged_te['prob_xgb'].values, merged_te['prob_linear'].values]).astype(np.float32)
     y_meta_te = merged_te['target'].values.astype(int)
     dates_meta_te = merged_te['Date'].values
     prices_te = merged_te['Close'].values if 'Close' in merged_te.columns else None
@@ -584,7 +657,7 @@ def main() -> None:
     Xte_m_s = meta_scaler.transform(Xte_m).astype(np.float32)
 
     # Train logistic regression with simple C grid search on CV-train split
-    feature_names_meta = ['prob_lstm', 'prob_xgb']
+    feature_names_meta = ['prob_lstm', 'prob_xgb', 'prob_linear']
     try:
         c_grid = [float(x) for x in (args.logreg_grid.split(',') if args.logreg_grid else [args.logreg_C])]
     except Exception:
@@ -777,6 +850,7 @@ def main() -> None:
             'lstm_checkpoint': os.path.abspath(lstm_model_path),
             'xgb_model': os.path.abspath(xgb_model_path),
             'xgb_report': os.path.abspath(xgb_report_path) if xgb_report_path else None,
+            'linear_model': os.path.abspath(linear_model_path),
             'seq_len': seq_len,
             'test_start_date': '2022-01-01',
         },
@@ -809,6 +883,7 @@ def main() -> None:
         'target': yte_m,
         'prob_lstm': prob_lstm_te_aligned[:len(y_prob_test)],
         'prob_xgb': prob_xgb_te_aligned[:len(y_prob_test)],
+        'prob_linear': merged_te_indexed.loc[dates_te, 'prob_linear'].values[:len(y_prob_test)] if 'prob_linear' in merged_te_indexed.columns else np.nan,
     })
     preds_csv_path = os.path.join(args.models_dir, 'meta_holdout_predictions.csv')
     preds_df.to_csv(preds_csv_path, index=False)

@@ -67,6 +67,7 @@
     "lstm_checkpoint": "/Users/al/Documents/Projects/S&P 500 Trading/models/lstm/lstm_holdout_20250904_185922.pt",
     "xgb_model": "/Users/al/Documents/Projects/S&P 500 Trading/models/xgboost/xgb_best.json",
     "xgb_report": "/Users/al/Documents/Projects/S&P 500 Trading/models/xgboost/xgb_best_report.json",
+    "linear_model": "/Users/al/Documents/Projects/S&P 500 Trading/models/linear/linear_logreg_20250906_091551.json",
     "seq_len": 60,
     "test_start_date": "2022-01-01"
   },
@@ -76,35 +77,36 @@
     "threshold_metric": "accuracy",
     "used_threshold": 0.39999999999999997,
     "coef": [
-      1.4036255289789015,
-      0.1135666652519745
+      1.3715904206678384,
+      0.10761865189637196,
+      0.10466892179704534
     ],
-    "intercept": 0.30156912226629545
+    "intercept": 0.305664072388803
   },
   "train_metrics_until_2021-12-31": {
-    "auc": 0.8387455404251042,
-    "accuracy": 0.7629891664824232,
-    "balanced_accuracy": 0.7505925162889637,
-    "precision": 0.8195597257307831,
+    "auc": 0.838629758973586,
+    "accuracy": 0.7627680742869777,
+    "balanced_accuracy": 0.7502948972413446,
+    "precision": 0.8192640692640693,
     "recall": 0.798804080196975,
-    "f1": 0.809048806555041
+    "f1": 0.8089047195013357
   },
   "val_metrics_until_2021-12-31": {
-    "auc": 0.7163559941520469,
-    "accuracy": 0.7569721115537849,
-    "balanced_accuracy": 0.6337171052631579,
-    "precision": 0.7466367713004485,
+    "auc": 0.7338998538011696,
+    "accuracy": 0.7549800796812749,
+    "balanced_accuracy": 0.6305921052631579,
+    "precision": 0.7449664429530202,
     "recall": 0.9736842105263158,
-    "f1": 0.8451776649746193
+    "f1": 0.844106463878327
   },
   "test_metrics_since_2022-01-01": {
-    "auc": 0.6220416024653312,
-    "accuracy": 0.6081632653061224,
-    "balanced_accuracy": 0.511864406779661,
-    "precision": 0.6043956043956044,
+    "auc": 0.6549229583975346,
+    "accuracy": 0.5986394557823129,
+    "balanced_accuracy": 0.5,
+    "precision": 0.5986394557823129,
     "recall": 1.0,
-    "f1": 0.7534246575342466
+    "f1": 0.7489361702127659
   },
-  "model_path": "models/meta/meta_logreg_20250905_171745.json",
-  "timestamp": "2025-09-05 17:17:45"
+  "model_path": "models/meta/meta_logreg_20250906_092841.json",
+  "timestamp": "2025-09-06 09:28:41"
 }

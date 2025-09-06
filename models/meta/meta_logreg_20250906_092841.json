@@ -1,0 +1,28 @@
+{
+  "type": "logistic_regression",
+  "feature_names": [
+    "prob_lstm",
+    "prob_xgb",
+    "prob_linear"
+  ],
+  "coef": [
+    1.3715904206678384,
+    0.10761865189637196,
+    0.10466892179704534
+  ],
+  "intercept": 0.305664072388803,
+  "threshold_metric": "accuracy",
+  "used_threshold": 0.39999999999999997,
+  "scaler_mean": [
+    0.6075665874803274,
+    0.6114792688056849,
+    0.50952236403769
+  ],
+  "scaler_scale": [
+    0.18540370030609668,
+    0.12691472298183115,
+    0.11964857078930817
+  ],
+  "lstm_seq_len": 60,
+  "timestamp": "2025-09-06 09:28:41"
+}
