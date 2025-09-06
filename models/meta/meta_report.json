@@ -105,6 +105,6 @@
     "recall": 1.0,
     "f1": 0.7534246575342466
   },
-  "model_path": "models/meta/meta_logreg_20250904_195941.json",
-  "timestamp": "2025-09-04 19:59:41"
+  "model_path": "models/meta/meta_logreg_20250905_171745.json",
+  "timestamp": "2025-09-05 17:17:45"
 }
