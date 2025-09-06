@@ -23,6 +23,9 @@ class HeadlinesUpdater:
         Initialize the updater with both API clients.
         """
         load_dotenv()
+        # Resolve absolute data directory based on this file's location
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.data_dir = os.path.join(self.base_dir, "data")
         
         # Initialize API clients
         try:
@@ -39,53 +42,45 @@ class HeadlinesUpdater:
             logger.warning(f"NewsAPI not available: {e}")
             self.newsapi_client = None
     
-    def find_latest_date_in_datasets(self, data_dir: str = "data") -> Optional[datetime]:
+    def find_latest_date_in_datasets(self, data_dir: Optional[str] = None) -> Optional[datetime]:
         """
-        Find the latest published date across all headline datasets.
+        Find the latest published date from recent_headlines.csv specifically.
         
         Args:
-            data_dir (str): Directory containing the CSV files
+            data_dir (str): Directory containing the CSV files. Defaults to absolute data dir.
             
         Returns:
             Optional[datetime]: Latest date or None if no data
         """
+        if data_dir is None:
+            data_dir = self.data_dir
+
         latest_date = None
-        
-        # Look for existing CSV files
-        csv_files = []
-        for file in os.listdir(data_dir):
-            if file.endswith('.csv') and 'headline' in file.lower():
-                csv_files.append(os.path.join(data_dir, file))
-        
-        logger.info(f"Found {len(csv_files)} headline CSV files: {csv_files}")
-        
-        for file_path in csv_files:
-            try:
-                df = pd.read_csv(file_path)
-                
-                # Check if published_date column exists
-                if 'published_date' in df.columns:
-                    try:
-                        df['published_date'] = pd.to_datetime(df['published_date'], utc=True)
-                        file_latest = df['published_date'].max()
-                        
-                        if latest_date is None or file_latest > latest_date:
-                            latest_date = file_latest
-                        
-                        logger.info(f"Latest date in {os.path.basename(file_path)}: {file_latest}")
-                    except Exception as e:
-                        logger.error(f"Error parsing dates in {file_path}: {e}")
-                        continue
-                
-            except Exception as e:
-                logger.error(f"Error reading {file_path}: {e}")
-        
-        if latest_date:
-            logger.info(f"Overall latest date found: {latest_date}")
-        else:
-            logger.info("No existing data found")
-        
-        return latest_date
+
+        recent_path = os.path.join(data_dir, "recent_headlines.csv")
+        if not os.path.exists(recent_path):
+            logger.info("recent_headlines.csv not found; no existing data")
+            return None
+
+        try:
+            df = pd.read_csv(recent_path)
+            if 'published_date' not in df.columns:
+                logger.warning("'published_date' column not found in recent_headlines.csv")
+                return None
+
+            # Parse dates robustly (handles timezone like +00:00)
+            df['published_date'] = pd.to_datetime(df['published_date'], utc=True, errors='coerce')
+            latest_date = df['published_date'].max()
+
+            if pd.isna(latest_date):
+                logger.info("No valid dates found in recent_headlines.csv")
+                return None
+
+            logger.info(f"Latest date in recent_headlines.csv: {latest_date}")
+            return latest_date
+        except Exception as e:
+            logger.error(f"Error reading recent_headlines.csv: {e}")
+            return None
     
     def fetch_new_headlines(self, start_date: datetime, end_date: datetime = None) -> Dict[str, pd.DataFrame]:
         """
@@ -141,18 +136,20 @@ class HeadlinesUpdater:
         return new_headlines
     
     def save_new_headlines(self, new_headlines: Dict[str, pd.DataFrame], 
-                        output_dir: str = "data") -> str:
+                        output_dir: Optional[str] = None) -> str:
         """
         Append new headlines to the existing recent_headlines.csv file.
         
         Args:
             new_headlines (Dict[str, pd.DataFrame]): New headlines from APIs
-            output_dir (str): Output directory
+            output_dir (str): Output directory (defaults to absolute data dir)
             
         Returns:
             str: Path to the saved file
         """
-        # Create output directory if it doesn't exist
+        # Resolve and create output directory
+        if output_dir is None:
+            output_dir = self.data_dir
         os.makedirs(output_dir, exist_ok=True)
         
         existing_file = os.path.join(output_dir, "recent_headlines.csv")
@@ -177,6 +174,7 @@ class HeadlinesUpdater:
                 mapped_df['content'] = df.get('content', '')
                 mapped_df['url'] = df.get('url', '')
                 mapped_df['image_url'] = ''  # Not available from APIs
+                # Preserve published_date as provided (string yyyy-mm-dd) to align with existing
                 mapped_df['published_date'] = df.get('published_date', '')
                 mapped_df['source_name'] = df.get('source', '')
                 mapped_df['market'] = 'SP500'  # Default market
@@ -239,7 +237,7 @@ class HeadlinesUpdater:
         """
         logger.info("Starting headline update process...")
         
-        # Find latest date in existing datasets
+        # Find latest date in recent_headlines.csv
         latest_date = self.find_latest_date_in_datasets()
         
         if latest_date is None:
@@ -247,16 +245,15 @@ class HeadlinesUpdater:
             start_date = datetime.now() - timedelta(days=30)
             logger.info("No existing data found. Fetching last 30 days of headlines.")
         else:
-            # Add 1 day to avoid duplicates, but ensure we don't go into the future
-            # Convert to timezone-naive datetime for comparison
+            # Inclusive: start from the latest date present in recent_headlines.csv
             if latest_date.tzinfo is not None:
                 latest_date = latest_date.replace(tzinfo=None)
-            
-            start_date = latest_date + timedelta(days=1)
+            start_date = latest_date
             now = datetime.now()
             if start_date > now:
+                # Edge case: if file has a future timestamp, step back one day
                 start_date = now - timedelta(days=1)
-            logger.info(f"Fetching headlines after {start_date}")
+            logger.info(f"Fetching headlines from {start_date} (inclusive)")
         
         # Fetch new headlines
         new_headlines = self.fetch_new_headlines(start_date)
