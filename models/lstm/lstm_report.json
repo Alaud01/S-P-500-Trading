@@ -18,10 +18,13 @@
     "scheduler_patience": 5,
     "min_lr": 1e-06,
     "threshold_metric": "f1",
-    "fixed_threshold": null
+    "fixed_threshold": null,
+    "loss_function": "bce",
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0
   },
   "models_dir": "models/lstm",
-  "model_path": "models/lstm/lstm_holdout_20250904_185922.pt",
+  "model_path": "models/lstm/lstm_holdout_20250906_180442.pt",
   "using_holdout_model": true,
   "dataset_info": {
     "shape": [
@@ -87,7 +90,7 @@
     "positive_class_ratio": 0.6241919020074855
   },
   "training_info": {
-    "timestamp": "2025-09-04 18:59:22",
+    "timestamp": "2025-09-06 18:04:42",
     "seed": 42,
     "smoke_test": false
   },
@@ -107,5 +110,5 @@
     "recall": 0.9840909090909091,
     "f1": 0.7663716814159292
   },
-  "holdout_model_path": "models/lstm/lstm_holdout_20250904_185922.pt"
+  "holdout_model_path": "models/lstm/lstm_holdout_20250906_180442.pt"
 }

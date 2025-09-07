@@ -64,7 +64,7 @@
     "positive_class_ratio": 0.6241919020074855
   },
   "base_artifacts": {
-    "lstm_checkpoint": "/Users/al/Documents/Projects/S&P 500 Trading/models/lstm/lstm_holdout_20250904_185922.pt",
+    "lstm_checkpoint": "/Users/al/Documents/Projects/S&P 500 Trading/models/lstm/lstm_holdout_20250906_180442.pt",
     "xgb_model": "/Users/al/Documents/Projects/S&P 500 Trading/models/xgboost/xgb_best.json",
     "xgb_report": "/Users/al/Documents/Projects/S&P 500 Trading/models/xgboost/xgb_best_report.json",
     "linear_model": "/Users/al/Documents/Projects/S&P 500 Trading/models/linear/linear_logreg_20250906_091551.json",
@@ -107,6 +107,6 @@
     "recall": 1.0,
     "f1": 0.7489361702127659
   },
-  "model_path": "models/meta/meta_logreg_20250906_092841.json",
-  "timestamp": "2025-09-06 09:28:41"
+  "model_path": "models/meta/meta_logreg_20250906_180925.json",
+  "timestamp": "2025-09-06 18:09:25"
 }

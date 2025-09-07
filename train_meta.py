@@ -511,10 +511,37 @@ def main() -> None:
     if not lstm_model_path:
         lstm_dir = os.path.join('models', 'lstm')
         if os.path.isdir(lstm_dir):
-            pt_files = [os.path.join(lstm_dir, f) for f in os.listdir(lstm_dir) if f.endswith('.pt')]
-            lstm_model_path = max(pt_files, key=os.path.getmtime) if pt_files else ''
+            # Get all .pt files
+            all_pt_files = [f for f in os.listdir(lstm_dir) if f.endswith('.pt')]
+            
+            # Prioritize holdout models (better for meta-modeling)
+            holdout_files = [f for f in all_pt_files if 'holdout' in f]
+            regular_files = [f for f in all_pt_files if 'holdout' not in f]
+            
+            # Select from holdout files first, then regular files
+            if holdout_files:
+                selected_file = max(holdout_files, key=lambda f: os.path.getmtime(os.path.join(lstm_dir, f)))
+                if args.verbose:
+                    print(f"  📁 Found {len(holdout_files)} holdout LSTM models, selecting latest: {selected_file}")
+            elif regular_files:
+                selected_file = max(regular_files, key=lambda f: os.path.getmtime(os.path.join(lstm_dir, f)))
+                if args.verbose:
+                    print(f"  📁 Found {len(regular_files)} regular LSTM models, selecting latest: {selected_file}")
+            else:
+                selected_file = None
+                
+            if selected_file:
+                lstm_model_path = os.path.join(lstm_dir, selected_file)
+            else:
+                lstm_model_path = ''
+        else:
+            lstm_model_path = ''
+    
     if not lstm_model_path or not os.path.exists(lstm_model_path):
         raise FileNotFoundError("LSTM checkpoint not found. Provide --lstm-model-path or train LSTM first.")
+    
+    if args.verbose:
+        print(f"  🤖 Using LSTM model: {os.path.basename(lstm_model_path)}")
 
     # Build masks for CV (<=2021-12-31) and Test (>=2022-01-01)
     if 'Date' in df.columns:
@@ -555,10 +582,14 @@ def main() -> None:
     if not xgb_model_path:
         found = _find_latest(os.path.join('models', 'xgboost'), '.json')
         xgb_model_path = found if found else ''
+        if args.verbose and xgb_model_path:
+            print(f"  🌳 Using XGBoost model: {os.path.basename(xgb_model_path)}")
     xgb_report_path = args.xgb_report_path
     if not xgb_report_path:
         found = _find_latest(os.path.join('models', 'xgboost'), '_report.json')
         xgb_report_path = found if found else ''
+        if args.verbose and xgb_report_path:
+            print(f"  📊 Using XGBoost report: {os.path.basename(xgb_report_path)}")
     if not xgb_model_path or not os.path.exists(xgb_model_path):
         raise FileNotFoundError("XGBoost model (.json) not found in models/xgboost. Provide --xgb-model-path.")
 
@@ -577,6 +608,8 @@ def main() -> None:
         if os.path.isdir(linear_dir):
             candidates = [os.path.join(linear_dir, f) for f in os.listdir(linear_dir) if f.endswith('.json') and 'linear_logreg_' in f]
             linear_model_path = max(candidates, key=os.path.getmtime) if candidates else ''
+            if args.verbose and linear_model_path:
+                print(f"  📈 Using Linear model: {os.path.basename(linear_model_path)}")
         else:
             linear_model_path = ''
     if not linear_model_path or not os.path.exists(linear_model_path):

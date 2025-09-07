@@ -134,6 +134,23 @@ class LSTMClassifier(nn.Module):
         return logits.squeeze(-1)
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, pos_weight: torch.Tensor = None):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.pos_weight = pos_weight
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        bce_loss = nn.BCEWithLogitsLoss(pos_weight=self.pos_weight, reduction='none')(logits, targets)
+        probs = torch.sigmoid(logits)
+        pt = torch.where(targets == 1, probs, 1 - probs)
+        alpha_t = torch.where(targets == 1, self.alpha, 1 - self.alpha)
+        
+        loss = alpha_t * (1 - pt).pow(self.gamma) * bce_loss
+        return loss.mean()
+
+
 def compute_class_pos_weight(labels: np.ndarray) -> float:
     pos = float((labels == 1).sum())
     neg = float((labels == 0).sum())
@@ -271,7 +288,16 @@ def train_one_fold(X: np.ndarray,
 
     pos_weight_value = compute_class_pos_weight(y_seq[train_seq_idx])
     pos_weight_tensor = torch.tensor([pos_weight_value], dtype=torch.float32, device=device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+    
+    if params.get('loss_function') == 'focal':
+        criterion = FocalLoss(
+            alpha=params.get('focal_alpha', 0.25),
+            gamma=params.get('focal_gamma', 2.0),
+            pos_weight=pos_weight_tensor
+        )
+    else:
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=params['lr'], weight_decay=params['weight_decay'])
     scheduler = None
     if params.get('use_scheduler', False):
@@ -592,7 +618,16 @@ def retrain_full_and_save(X: np.ndarray,
 
     pos_weight_value = compute_class_pos_weight(y_seq)
     pos_weight_tensor = torch.tensor([pos_weight_value], dtype=torch.float32, device=device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+    
+    if params.get('loss_function') == 'focal':
+        criterion = FocalLoss(
+            alpha=params.get('focal_alpha', 0.25),
+            gamma=params.get('focal_gamma', 2.0),
+            pos_weight=pos_weight_tensor
+        )
+    else:
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+        
     optimizer = torch.optim.Adam(model.parameters(), lr=params['lr'], weight_decay=params['weight_decay'])
 
     if params['verbose']:
@@ -1128,6 +1163,9 @@ def main():
     parser.add_argument('--min-lr', type=float, default=1e-6)
     parser.add_argument('--threshold-metric', type=str, default='f1', choices=['f1', 'youden'])
     parser.add_argument('--fixed-threshold', type=float, default=None, help='Fixed decision threshold (e.g., 0.5). If set, disables threshold tuning.')
+    parser.add_argument('--loss-function', type=str, default='bce', choices=['bce', 'focal'], help='Loss function to use')
+    parser.add_argument('--focal-alpha', type=float, default=0.25, help='Alpha parameter for Focal Loss')
+    parser.add_argument('--focal-gamma', type=float, default=2.0, help='Gamma parameter for Focal Loss')
     parser.add_argument('--test-start-date', type=str, default='2022-01-01')
     parser.add_argument('--search-trials', type=int, default=0, help='Number of random trials. 0 disables search')
     parser.add_argument('--seed', type=int, default=42)
@@ -1199,6 +1237,9 @@ def main():
         'min_lr': args.min_lr,
         'threshold_metric': args.threshold_metric,
         'fixed_threshold': args.fixed_threshold,
+        'loss_function': args.loss_function,
+        'focal_alpha': args.focal_alpha,
+        'focal_gamma': args.focal_gamma,
     }
 
     cv_cfg = {
@@ -1358,7 +1399,17 @@ def main():
                     ).to(device)
 
                     pos_weight_value = compute_class_pos_weight(y_pre_seq[train_seq_idx])
-                    criterion_holdout = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight_value], dtype=torch.float32, device=device))
+                    pos_weight_tensor = torch.tensor([pos_weight_value], dtype=torch.float32, device=device)
+                    
+                    if final_params.get('loss_function') == 'focal':
+                        criterion_holdout = FocalLoss(
+                            alpha=final_params.get('focal_alpha', 0.25),
+                            gamma=final_params.get('focal_gamma', 2.0),
+                            pos_weight=pos_weight_tensor
+                        )
+                    else:
+                        criterion_holdout = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+
                     optimizer_holdout = torch.optim.Adam(holdout_model.parameters(), lr=final_params['lr'], weight_decay=final_params['weight_decay'])
                     scheduler_holdout = None
                     if final_params.get('use_scheduler', False):
