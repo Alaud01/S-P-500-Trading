@@ -144,16 +144,16 @@ def simulate_dca(prices: pd.DataFrame, cfg: SimulationConfig) -> pd.DataFrame:
 
 
 def allocation_from_probability(prob: float, prev_weight: float, band: float) -> float:
-    # New decision boundaries:
+    # Decision boundaries:
     # - Buy when prob > 0.8 (allocate 100%)
-    # - Hold when 0.5 <= prob <= 0.8 (keep previous allocation)
-    # - Sell when prob < 0.5 (allocate 0%)
-    if prob > 0.9:
-        return 1.0  # Full allocation when probability is high
-    elif prob >= 0.5:
-        return prev_weight  # Hold current allocation
+    # - Hold when 0.7 <= prob <= 0.8 (keep previous allocation)
+    # - Sell when prob < 0.7 (allocate 0%)
+    if prob > 0.8:
+        return 1.0
+    elif prob < 0.7:
+        return 0.0
     else:
-        return 0.0  # No allocation when probability is low
+        return prev_weight
 
 
 def simulate_meta_strategy(prices: pd.DataFrame, preds: pd.DataFrame, cfg: SimulationConfig) -> pd.DataFrame:
@@ -216,17 +216,11 @@ def simulate_meta_strategy(prices: pd.DataFrame, preds: pd.DataFrame, cfg: Simul
         delta_value = desired_equity_value - current_equity_value
         delta_shares = delta_value / price if price > 0 else 0.0
 
-        # Decision thresholds - new logic for sell decisions
-        # Only allow sells when probability is below 0.5
-        if delta_shares < 0:
-            # If not in sell zone (prob >= 0.5), suppress rebalancing sells
-            if not (prob < 0.5):
-                delta_shares = 0.0
-                weight = prev_weight
-            # Never sell on a loss even if in sell zone
-            elif shares > 0 and price < avg_purchase_price:
-                delta_shares = 0.0
-                weight = prev_weight
+        # Only allow sells when probability is below 0.7
+        if delta_shares < 0 and not (prob < 0.7):
+            # Suppress sells outside sell zone
+            delta_shares = 0.0
+            weight = prev_weight
 
         if abs(delta_shares) > cfg.trade_threshold_shares:
             # Update average purchase price for buys
@@ -301,9 +295,9 @@ def plot_price_with_trades(prices: pd.DataFrame, model_df: pd.DataFrame, out_pat
     trades = model_df.loc[model_df['trade_shares'] != 0]
     buys = trades.loc[trades['trade_shares'] > 0]
     sells = trades.loc[trades['trade_shares'] < 0]
-    # Optional: filter sells to only those where prob is below 0.5
+    # Filter sells to only those where prob is below 0.7
     if 'prob_meta' in model_df.columns:
-        sells = sells.loc[model_df.loc[sells.index, 'prob_meta'] < 0.5]
+        sells = sells.loc[model_df.loc[sells.index, 'prob_meta'] < 0.7]
 
     ax1.scatter(buys.index, prices.loc[buys.index, 'Close'], marker='^', color='green', s=60, label='Buy')
     ax1.scatter(sells.index, prices.loc[sells.index, 'Close'], marker='v', color='red', s=60, label='Sell')
@@ -318,15 +312,14 @@ def plot_price_with_trades(prices: pd.DataFrame, model_df: pd.DataFrame, out_pat
         # Plot model predictions
         ax2.plot(model_df.index, model_df['prob_meta'], label='Model Prediction', color='blue', linewidth=1.5, alpha=0.8)
         
-        # Add decision boundaries for new logic
+        # Decision thresholds for plotting
         buy_threshold = 0.8
-        sell_threshold = 0.5
-        
-        ax2.axhline(y=0.5, color='gray', linestyle='--', alpha=0.7, label='Neutral (0.5)')
+        sell_threshold = 0.7
+
         ax2.axhline(y=buy_threshold, color='green', linestyle='--', alpha=0.7, label=f'Buy Threshold ({buy_threshold:.1f})')
         ax2.axhline(y=sell_threshold, color='red', linestyle='--', alpha=0.7, label=f'Sell Threshold ({sell_threshold:.1f})')
-        
-        # Shade the hold zone (0.5 to 0.8)
+
+        # Shade the hold zone (0.7 to 0.8)
         ax2.axhspan(sell_threshold, buy_threshold, alpha=0.2, color='yellow', label='Hold Zone')
         
         # Mark regions
