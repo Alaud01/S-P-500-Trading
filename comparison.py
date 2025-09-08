@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 from dataclasses import dataclass
 from typing import Tuple, Dict
@@ -79,8 +80,8 @@ def load_meta_predictions(preds_csv_path: str, start_date: str) -> pd.DataFrame:
 @dataclass
 class SimulationConfig:
     start_date: str = '2022-01-01'
-    initial_capital: float = 10000.0
-    monthly_contribution: float = 500.0
+    initial_capital: float = 1000.0
+    monthly_contribution: float = 1000.0
     neutral_band: float = 0.3
     trade_threshold_shares: float = 1e-9  # avoid counting dust as trades
     risk_free_rate_annual: float = 0.0
@@ -223,6 +224,14 @@ def simulate_meta_strategy(prices: pd.DataFrame, preds: pd.DataFrame, cfg: Simul
             weight = prev_weight
 
         if abs(delta_shares) > cfg.trade_threshold_shares:
+            # Log the trade
+            trade_type = "BUY" if delta_shares > 0 else "SELL"
+            trade_value = abs(delta_shares * price)
+            logging.info(f"{date.strftime('%Y-%m-%d')} | {trade_type} | "
+                        f"Shares: {delta_shares:+.4f} | Price: ${price:.2f} | "
+                        f"Value: ${trade_value:.2f} | Prob: {prob:.3f} | "
+                        f"Portfolio: ${portfolio_value:.2f}")
+            
             # Update average purchase price for buys
             if delta_shares > 0:
                 # Buying: update average purchase price
@@ -347,6 +356,7 @@ def plot_price_with_trades(prices: pd.DataFrame, model_df: pd.DataFrame, out_pat
     
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.show()
     plt.close(fig)
 
 
@@ -364,6 +374,7 @@ def plot_equity_curves(dca_df: pd.DataFrame, model_df: pd.DataFrame, out_path: s
     ax.legend()
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
+    plt.show()
     plt.close(fig)
 
 
@@ -380,6 +391,7 @@ def plot_allocation(model_df: pd.DataFrame, out_path: str) -> None:
     ax.legend(loc='upper left')
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
+    plt.show()
     plt.close(fig)
 
 
@@ -417,6 +429,13 @@ def main():
     parser.add_argument('--outdir', type=str, default='plots/comparison')
 
     args = parser.parse_args()
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(message)s',
+        handlers=[logging.StreamHandler()]
+    )
 
     cfg = SimulationConfig(
         start_date=args.start_date,
@@ -444,6 +463,10 @@ def main():
         raise ValueError('No prediction data available for the specified start date.')
 
     # Simulations
+    logging.info("=== TRADING LOG ===")
+    logging.info("Date       | Type | Shares    | Price   | Value    | Prob | Portfolio")
+    logging.info("-" * 80)
+    
     dca_df = simulate_dca(prices, cfg)
     model_df = simulate_meta_strategy(prices, preds, cfg)
 
