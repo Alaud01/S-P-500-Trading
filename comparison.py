@@ -1,3 +1,7 @@
+# Model comparison and trading strategy backtesting
+# Usage: python comparison.py
+# Configurable: model paths, trading parameters, performance metrics
+
 import argparse
 import logging
 import os
@@ -15,6 +19,8 @@ import seaborn as sns
 # ----------------------
 
 def compute_cagr(series: pd.Series) -> float:
+    """Calculate Compound Annual Growth Rate
+    Configurable: time period assumptions"""
     if series.empty:
         return float('nan')
     start_value = series.iloc[0]
@@ -29,6 +35,8 @@ def compute_cagr(series: pd.Series) -> float:
 
 
 def compute_max_drawdown(series: pd.Series) -> Tuple[float, pd.Timestamp, pd.Timestamp]:
+    """Calculate maximum drawdown and peak/trough dates
+    Configurable: drawdown calculation method"""
     if series.empty:
         return float('nan'), pd.NaT, pd.NaT
     cum_max = series.cummax()
@@ -39,6 +47,8 @@ def compute_max_drawdown(series: pd.Series) -> Tuple[float, pd.Timestamp, pd.Tim
 
 
 def compute_sharpe(returns: pd.Series, risk_free_rate_annual: float = 0.0) -> float:
+    """Calculate Sharpe ratio for risk-adjusted returns
+    Configurable: risk-free rate, time period assumptions"""
     if returns.empty:
         return float('nan')
     # Convert annual risk-free to daily approximation

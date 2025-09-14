@@ -1,4 +1,6 @@
-# run command: python train_lstm.py --verbose
+# LSTM model training for S&P 500 prediction
+# Usage: python train_lstm.py --verbose
+# Configurable: sequence_length, hidden_size, learning_rate, epochs, batch_size
 
 import os
 import json
@@ -98,6 +100,8 @@ def time_series_cv_indices(n_effective: int,
 
 
 class SequenceDataset(Dataset):
+    """Dataset for LSTM sequence data
+    Configurable: sequence length, feature selection"""
     def __init__(self, X_seq: np.ndarray, y_seq: np.ndarray, indices: np.ndarray):
         self.X = X_seq[indices]
         self.y = y_seq[indices]
@@ -110,6 +114,8 @@ class SequenceDataset(Dataset):
 
 
 class LSTMClassifier(nn.Module):
+    """LSTM neural network for sequence classification
+    Configurable: hidden_size, num_layers, dropout, bidirectional"""
     def __init__(self, input_size: int, hidden_size: int = 64, num_layers: int = 2, dropout: float = 0.2, bidirectional: bool = False):
         super().__init__()
         self.lstm = nn.LSTM(input_size=input_size,
@@ -135,6 +141,8 @@ class LSTMClassifier(nn.Module):
 
 
 class FocalLoss(nn.Module):
+    """Focal loss for handling class imbalance
+    Configurable: alpha, gamma, pos_weight"""
     def __init__(self, alpha: float = 0.25, gamma: float = 2.0, pos_weight: torch.Tensor = None):
         super().__init__()
         self.alpha = alpha
@@ -164,6 +172,8 @@ def evaluate(model: nn.Module,
              loader: DataLoader,
              device: torch.device,
              threshold: float = 0.5) -> Dict[str, float]:
+    """Evaluate model performance on validation/test set
+    Configurable: evaluation metrics, threshold"""
     model.eval()
     all_probs: List[float] = []
     all_preds: List[int] = []
@@ -248,6 +258,8 @@ def train_one_fold(X: np.ndarray,
                    val_idx_eff: np.ndarray,
                    params: Dict[str, Any],
                    device: torch.device) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, List[float]], float]:
+    """Train LSTM model for one cross-validation fold
+    Configurable: model parameters, training settings, early stopping"""
     # The CV splits are already expressed in sequence-index space [0..n_effective-1].
     # Fit scaler only on raw rows covered by the training sequences (up to the tail row of the last train sequence)
     last_train_seq = int(train_idx_eff.max())

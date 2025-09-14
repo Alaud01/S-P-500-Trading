@@ -7,7 +7,8 @@ warnings.filterwarnings('ignore')
 
 def load_and_process_datasets():
     """
-    Load and process all datasets, handling different frequencies and date ranges.
+    Load and merge all datasets (S&P 500, GDP, gold, unemployment, inflation, interest rates)
+    Configurable: cutoff_date for data filtering
     """
     print("Loading datasets...")
     
@@ -106,7 +107,8 @@ def load_and_process_datasets():
 
 def process_sentiment_data(headlines_df, recent_headlines_df, sentiment_data):
     """
-    Create daily-varying sentiment features from per-headline results if available.
+    Process sentiment data and create daily sentiment features
+    Configurable: sentiment aggregation methods (mean, weighted, etc.)
     Falls back to yearly distribution if detailed results are unavailable.
     """
     print("Processing sentiment data...")
@@ -186,7 +188,8 @@ def process_sentiment_data(headlines_df, recent_headlines_df, sentiment_data):
 
 def create_merged_dataset(datasets):
     """
-    Create a merged dataset with all variables aligned to daily frequency.
+    Merge all datasets to daily frequency with forward-fill for missing values
+    Configurable: merge strategy and frequency alignment
     """
     print("Creating merged dataset...")
     
@@ -253,7 +256,8 @@ def create_merged_dataset(datasets):
 
 def feature_engineering(df):
     """
-    Create features for predicting S&P 500 direction.
+    Create technical indicators and lagged features for prediction
+    Configurable: lookback periods, indicator parameters
     """
     print("Performing feature engineering...")
     df.set_index('Date', inplace=True)
@@ -320,7 +324,8 @@ def feature_engineering(df):
 
 def main():
     """
-    Main function to merge all datasets.
+    Build complete dataset by merging sentiment, economic, and market data
+    Configurable: output file path, feature engineering parameters
     """
     print("Starting dataset merge process...")
     

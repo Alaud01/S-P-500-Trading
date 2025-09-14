@@ -1,4 +1,6 @@
-# run command: python train_xgboost.py --data data/final_dataset_for_modeling.csv --use_scaler --target_cleanup --verbose --threshold_metric accuracy
+# XGBoost model training for S&P 500 prediction
+# Usage: python train_xgboost.py --data data/final_dataset_for_modeling.csv --use_scaler --target_cleanup --verbose --threshold_metric accuracy
+# Configurable: hyperparameters, feature selection, cross-validation, threshold optimization
 
 import os
 import json
@@ -38,6 +40,7 @@ class _IdentityScaler:
 
 @dataclass
 class XGBParams:
+	"""XGBoost hyperparameters - all configurable for optimization"""
 	# Core params
 	n_estimators: int = 1500
 	max_depth: int = 3

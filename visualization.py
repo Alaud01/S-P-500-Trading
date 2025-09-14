@@ -13,7 +13,8 @@ plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
 
 def load_and_prepare_data():
-    """Load and prepare the dataset for analysis"""
+    """Load and prepare dataset for analysis
+    Configurable: input file path, missing value handling strategy"""
     print("Loading dataset...")
     df = pd.read_csv('data/final_dataset_for_modeling.csv')
     df['Date'] = pd.to_datetime(df['Date'])
@@ -34,7 +35,8 @@ def load_and_prepare_data():
     return df
 
 def analyze_target_distribution(df, plots_dir):
-    """Analyze the target variable distribution"""
+    """Analyze target variable distribution and temporal patterns
+    Configurable: plot size, time aggregation periods"""
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
     
     # Target distribution
@@ -80,7 +82,8 @@ def analyze_target_distribution(df, plots_dir):
     plt.show()
 
 def analyze_feature_correlations(df, plots_dir):
-    """Analyze correlations between features and target"""
+    """Analyze feature correlations and relationships
+    Configurable: correlation threshold, feature selection criteria"""
     # Select numerical features (excluding Date and Target)
     numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     numerical_cols.remove('Target')
@@ -130,7 +133,8 @@ def analyze_feature_correlations(df, plots_dir):
     return correlations
 
 def analyze_technical_indicators(df, plots_dir):
-    """Analyze technical indicators and their relationship with target"""
+    """Analyze technical indicators and market patterns
+    Configurable: indicator parameters, lookback periods"""
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
     # Moving Averages
@@ -168,7 +172,8 @@ def analyze_technical_indicators(df, plots_dir):
     plt.show()
 
 def analyze_sentiment_and_news(df, plots_dir):
-    """Analyze sentiment and news features"""
+    """Analyze sentiment features and news impact
+    Configurable: sentiment aggregation methods, time windows"""
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
     # Sentiment Score Distribution by Target
@@ -208,7 +213,8 @@ def analyze_sentiment_and_news(df, plots_dir):
     plt.show()
 
 def analyze_economic_indicators(df, plots_dir):
-    """Analyze economic indicators"""
+    """Analyze economic indicators and macro trends
+    Configurable: indicator selection, time aggregation"""
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
     economic_features = ['GDP', 'Gold_Price', 'Unemployment_Rate', 'Interest_Rate', 'Inflation_Rate']
@@ -247,7 +253,8 @@ def analyze_economic_indicators(df, plots_dir):
     plt.show()
 
 def perform_feature_selection(df, plots_dir):
-    """Perform feature selection analysis"""
+    """Perform feature selection using multiple methods
+    Configurable: selection methods, number of features, scoring functions"""
     # Prepare data for feature selection
     numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     numerical_cols.remove('Target')
@@ -303,7 +310,8 @@ def perform_feature_selection(df, plots_dir):
     return mi_df, f_df
 
 def generate_summary_report(df, correlations, mi_df, f_df):
-    """Generate a comprehensive summary report"""
+    """Generate comprehensive analysis summary report
+    Configurable: report sections, statistical thresholds"""
     print("\n" + "="*80)
     print("COMPREHENSIVE DATA EXPLORATION REPORT")
     print("="*80)
@@ -386,7 +394,8 @@ def generate_summary_report(df, correlations, mi_df, f_df):
     print(f"   - Focus on features with high mutual information scores")
 
 def main():
-    """Main function to run the complete analysis"""
+    """Run comprehensive data exploration and visualization
+    Configurable: output directory, analysis sections"""
     print("Starting comprehensive data exploration...")
     
     # Create plots directory and subdirectories if they don't exist

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 S&P 500 Headlines Sentiment Analysis using FinBERT
-Optimized for accuracy in financial sentiment analysis
+Analyzes financial headlines sentiment and generates confidence scores
 """
 
 import pandas as pd
@@ -21,26 +21,27 @@ warnings.filterwarnings('ignore')
 
 class FinBERTSentimentAnalyzer:
     """
-    High-accuracy sentiment analysis using FinBERT for financial headlines
+    FinBERT sentiment analysis for financial headlines
+    Configurable parameters: model_name, device, batch_size
     """
     
     def __init__(self, model_name="ProsusAI/finbert", device=None):
         """
-        Initialize FinBERT model for sentiment analysis
+        Initialize FinBERT model
         
-        Args:
-            model_name (str): HuggingFace model name
-            device (str): Device to run inference on ('mps', 'cuda', 'cpu', or None for auto)
+        Parameters:
+            model_name: HuggingFace model name (default: "ProsusAI/finbert")
+            device: 'mps' (Mac GPU), 'cuda', 'cpu', or None for auto-detection
         """
         self.model_name = model_name
         
-        # Device selection with priority: MPS (Mac GPU) > CUDA > CPU
+        # Auto-detect best available device
         if device:
             self.device = device
         else:
             if torch.backends.mps.is_available():
                 self.device = 'mps'
-                print("Using Mac M4 GPU (Metal Performance Shaders)")
+                print("Using Mac GPU (MPS)")
             elif torch.cuda.is_available():
                 self.device = 'cuda'
                 print("Using CUDA GPU")
@@ -73,7 +74,7 @@ class FinBERTSentimentAnalyzer:
     
     def preprocess_text(self, text):
         """
-        Enhanced preprocessing for financial text to improve sentiment accuracy
+        Clean and normalize financial text for better sentiment analysis
         
         Args:
             text (str): Input text to preprocess
@@ -462,7 +463,8 @@ class FinBERTSentimentAnalyzer:
     
     def predict_sentiment(self, text, return_probs=False):
         """
-        Predict sentiment for a single text with enhanced accuracy
+        Predict sentiment for a single text
+        Parameters: return_probs=True to get probability scores
         
         Args:
             text (str): Input text
@@ -512,6 +514,7 @@ class FinBERTSentimentAnalyzer:
     def batch_predict(self, texts, batch_size=32):
         """
         Predict sentiment for multiple texts in batches
+        Parameters: batch_size (default=32) - adjust for memory constraints
         
         Args:
             texts (list): List of texts to analyze
@@ -537,6 +540,7 @@ class FinBERTSentimentAnalyzer:
     def analyze_dataset(self, df, text_column='Title', date_column='Date', price_column='CP'):
         """
         Analyze sentiment for entire dataset
+        Parameters: text_column, date_column, price_column - customize column names
         
         Args:
             df (pd.DataFrame): Input dataframe
@@ -571,7 +575,7 @@ class FinBERTSentimentAnalyzer:
     
     def get_sentiment_statistics(self, df):
         """
-        Get comprehensive sentiment statistics
+        Calculate sentiment distribution and confidence statistics
         
         Args:
             df (pd.DataFrame): DataFrame with sentiment analysis results
@@ -605,7 +609,8 @@ class FinBERTSentimentAnalyzer:
     
     def plot_sentiment_analysis(self, df, save_path=None):
         """
-        Create comprehensive sentiment analysis visualizations
+        Create sentiment analysis visualizations
+        Parameters: save_path - specify file path to save plots
         
         Args:
             df (pd.DataFrame): DataFrame with sentiment analysis results
@@ -658,7 +663,7 @@ class FinBERTSentimentAnalyzer:
     
     def save_results(self, df, output_path):
         """
-        Save sentiment analysis results
+        Save sentiment analysis results to CSV and JSON
         
         Args:
             df (pd.DataFrame): DataFrame with sentiment analysis results
@@ -679,7 +684,8 @@ class FinBERTSentimentAnalyzer:
 
 def main():
     """
-    Main function to run sentiment analysis on S&P 500 headlines
+    Run sentiment analysis on S&P 500 headlines dataset
+    Configurable: device, batch_size, input/output paths
     """
     print("=" * 60)
     print("S&P 500 Headlines Sentiment Analysis using FinBERT")

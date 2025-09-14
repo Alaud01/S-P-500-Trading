@@ -1,3 +1,7 @@
+# Linear regression model training for S&P 500 prediction
+# Usage: python train_linear.py --verbose
+# Configurable: regularization, feature selection, cross-validation
+
 import os
 import json
 import time
@@ -24,6 +28,8 @@ def set_seed(seed: int = 42) -> None:
 
 
 def load_dataset(csv_path: str) -> pd.DataFrame:
+    """Load and preprocess dataset
+    Configurable: input file path, missing value handling"""
     df = pd.read_csv(csv_path)
     if 'Date' in df.columns:
         df['Date'] = pd.to_datetime(df['Date'])
@@ -34,6 +40,8 @@ def load_dataset(csv_path: str) -> pd.DataFrame:
 
 
 def select_features_and_target(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, List[str]]:
+    """Select numerical features and target variable
+    Configurable: feature selection criteria, target column name"""
     feature_df = df.select_dtypes(include=[np.number]).copy()
     if 'Target' not in feature_df.columns:
         raise ValueError("Target column 'Target' not found in dataset. Run built_dataset.py first.")
@@ -94,6 +102,8 @@ def cross_validate_linear(X: np.ndarray,
                             solver: str,
                             verbose: bool = True,
                             threshold: float = 0.5) -> Tuple[Dict[str, float], List[Dict[str, float]], Dict[str, Any]]:
+    """Perform time-series cross-validation for linear regression
+    Configurable: regularization parameters, solvers, CV splits"""
     splits = time_series_cv_indices(n_rows=X.shape[0],
                                     n_splits=n_splits,
                                     val_window=val_window,
