@@ -1,0 +1,95 @@
+{
+  "dataset_info": {
+    "shape": [
+      5878,
+      49
+    ],
+    "n_features": 49,
+    "feature_names": [
+      "Open",
+      "High",
+      "Low",
+      "Close",
+      "Adj_Close",
+      "Volume",
+      "Sentiment_Score",
+      "Headline_Count",
+      "GDP",
+      "Gold_Price",
+      "Unemployment_Rate",
+      "Interest_Rate",
+      "Inflation_Rate",
+      "MA_7",
+      "MA_14",
+      "MA_30",
+      "Daily_Return",
+      "Volatility_14",
+      "RSI",
+      "MACD",
+      "Signal_Line",
+      "BB_Middle",
+      "BB_Upper",
+      "BB_Lower",
+      "BB_Width",
+      "BB_Position",
+      "GDP_QoQ_Pct_Change",
+      "Unemployment_MoM_Change",
+      "Interest_MoM_Change",
+      "Inflation_MoM_Change",
+      "Price_vs_MA30",
+      "RSI_Overbought",
+      "RSI_Oversold",
+      "MACD_Crossover",
+      "Close_Lag_1",
+      "Volume_Lag_1",
+      "Sentiment_Lag_1",
+      "Close_Lag_3",
+      "Volume_Lag_3",
+      "Sentiment_Lag_3",
+      "Close_Lag_5",
+      "Volume_Lag_5",
+      "Sentiment_Lag_5",
+      "Close_Lag_7",
+      "Volume_Lag_7",
+      "Sentiment_Lag_7",
+      "Close_Lag_14",
+      "Volume_Lag_14",
+      "Sentiment_Lag_14"
+    ],
+    "target_distribution": [
+      2209,
+      3669
+    ],
+    "positive_class_ratio": 0.6241919020074855
+  },
+  "cv_metrics": {
+    "auc": 0.5834878269718853,
+    "accuracy": 0.44666666666666666,
+    "balanced_accuracy": 0.5180190055288519,
+    "precision": 0.6792281912765106,
+    "recall": 0.3251321155156897,
+    "f1": 0.35138918537675984
+  },
+  "cv_config": {
+    "n_splits": 5,
+    "val_window": 180,
+    "gap": 14,
+    "min_train_window": 365
+  },
+  "model": {
+    "type": "logistic_regression",
+    "C": 1.0,
+    "solver": "lbfgs",
+    "used_threshold": 0.5,
+    "model_path": "models/linear/linear_logreg_20260522_121309.json"
+  },
+  "test_metrics_since_2022-01-01": {
+    "auc": 0.7021722991510926,
+    "accuracy": 0.5856423173803527,
+    "balanced_accuracy": 0.5231884057971015,
+    "precision": 0.577120822622108,
+    "recall": 1.0,
+    "f1": 0.7318663406682967
+  },
+  "timestamp": "2026-05-22 12:13:09"
+}
