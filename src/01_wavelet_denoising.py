@@ -22,19 +22,6 @@ def universal_threshold(coeffs):
     return sigma * np.sqrt(2 * np.log(n))
 
 
-def wavelet_denoise_series(series, wavelet=WAVELET_FAMILY, level=WAVELET_LEVEL, mode=WAVELET_MODE):
-    orig_length = len(series)
-    pad_len = (2 ** level) - (orig_length % (2 ** level)) if orig_length % (2 ** level) != 0 else 0
-    padded = np.pad(series, (0, pad_len), mode='reflect')
-    coeffs = pywt.wavedec(padded, wavelet, level=level)
-    threshold = universal_threshold(coeffs)
-    coeffs_thresholded = [coeffs[0]]
-    for detail in coeffs[1:]:
-        coeffs_thresholded.append(pywt.threshold(detail, threshold, mode=mode))
-    reconstructed = pywt.waverec(coeffs_thresholded, wavelet)
-    return reconstructed[:orig_length]
-
-
 def causal_wavelet_denoise_series(series, wavelet=WAVELET_FAMILY, level=WAVELET_LEVEL,
                                    mode=WAVELET_MODE, lookback=WAVELET_CAUSAL_LOOKBACK):
     min_window = 2 ** (level + 1)
@@ -47,10 +34,8 @@ def causal_wavelet_denoise_series(series, wavelet=WAVELET_FAMILY, level=WAVELET_
         if len(window) < min_window:
             result[i] = series[i]
             continue
-        if len(window) % 2 != 0:
-            pass
         pad_len = (2 ** level) - (len(window) % (2 ** level)) if len(window) % (2 ** level) != 0 else 0
-        padded_window = np.pad(window, (0, pad_len), mode='reflect')
+        padded_window = np.pad(window, (0, pad_len), mode='constant', constant_values=0)
         coeffs = pywt.wavedec(padded_window, wavelet, level=level)
         threshold = universal_threshold(coeffs)
         coeffs_thresholded = [coeffs[0]]

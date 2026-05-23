@@ -5,13 +5,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import pandas as pd
 from config import (
-    RAW_PRICE_CSV, DENOISED_CSV, MERGED_CSV, FEATURES_CSV,
+    RAW_PRICE_CSV, DENOISED_CSV, MERGED_CSV, VIX_CSV, FEATURES_CSV,
     DATE_COL, PRICE_COLS, VOLUME_COL,
     MA_WINDOWS, RSI_WINDOW,
     MACD_FAST, MACD_SLOW, MACD_SIGNAL,
     BB_WINDOW, BB_STD,
     ATR_WINDOW, VOLATILITY_WINDOW, STOCH_WINDOW,
     RETURN_LAG_WINDOWS, SEQUENCE_LENGTH, SEED,
+    SENTIMENT_END_DATE,
 )
 np.random.seed(SEED)
 
@@ -118,6 +119,9 @@ def merge_raw_prices(df, raw_path=RAW_PRICE_CSV):
             df[f"raw_{col.lower()}"] = raw[col]
     df["raw_daily_return"] = raw["Close"].pct_change()
     df["raw_log_return"] = np.log(raw["Close"] / (raw["Close"].shift(1) + 1e-10))
+    # Forward 1-day return: the return realized from close[t] to close[t+1]
+    # This is the correct return for strategy evaluation (prediction at t predicts t->t+1 direction)
+    df["forward_1d_return"] = raw["Close"].pct_change().shift(-1)
     df = df.reset_index()
     return df
 
@@ -132,8 +136,11 @@ def merge_macro_sentiment(df, path=MERGED_CSV):
     macro[DATE_COL] = pd.to_datetime(macro[DATE_COL])
 
     # Shift macro data forward to account for publication lag
+    # GDP: advance estimate ~30 days after quarter end, final ~60 days -> shift 44 trading days (~2 months)
+    # Unemployment: BLS Employment Situation released ~1st Friday of following month -> shift 22 (~1 month)
+    # CPI/Inflation: released ~10-15 days after month end -> shift 22 (~1 month, conservative)
     macro = macro.sort_values(DATE_COL).reset_index(drop=True)
-    macro["GDP"] = macro["GDP"].shift(22)
+    macro["GDP"] = macro["GDP"].shift(44)
     macro["Unemployment_Rate"] = macro["Unemployment_Rate"].shift(22)
     macro["Inflation_Rate"] = macro["Inflation_Rate"].shift(22)
 
@@ -163,6 +170,25 @@ def merge_macro_sentiment(df, path=MERGED_CSV):
     return df
 
 
+def merge_vix(df, path=VIX_CSV):
+    """Merge VIX data — VIX_regime only (rolling percentile rank, bounded 0-1)."""
+    vix = pd.read_csv(path, parse_dates=[DATE_COL])
+    vix = vix[[DATE_COL, "VIX"]].drop_duplicates(subset=DATE_COL, keep="first")
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL])
+    vix[DATE_COL] = pd.to_datetime(vix[DATE_COL])
+    vix = vix.sort_values(DATE_COL).reset_index(drop=True)
+
+    vix["VIX_regime_pct"] = vix["VIX"].pct_change()
+    vix["VIX_hl_spread"] = (vix["VIX"].rolling(14).max() - vix["VIX"].rolling(14).min()) / (vix["VIX"].rolling(14).mean() + 1e-10)
+
+    vix.drop(columns=["VIX"], inplace=True)
+
+    df = df.merge(vix, on=DATE_COL, how="left")
+    vix_fill = ["VIX_regime_pct", "VIX_hl_spread"]
+    df[vix_fill] = df[vix_fill].ffill()
+    return df
+
+
 def create_target(df, raw_close):
     """
     Binary direction: 1 if next-day raw Close > current raw Close, else 0.
@@ -188,6 +214,9 @@ def main():
     df = merge_macro_sentiment(df)
     print(f"  Merged macro + sentiment data (with publication lag)")
 
+    df = merge_vix(df)
+    print(f"  Merged VIX data (stationary: return, z-score, regime)")
+
     df = merge_raw_prices(df)
     print(f"  Merged raw market prices for target + evaluation")
 
@@ -199,6 +228,12 @@ def main():
     abs_cols_to_drop = ["Open", "High", "Low", "Close", "Volume"]
     df.drop(columns=[c for c in abs_cols_to_drop if c in df.columns], inplace=True)
     print(f"  Dropped absolute price/volume columns: {abs_cols_to_drop}")
+
+    # Truncate at sentiment end date — no reliable sentiment data after this
+    cutoff = pd.Timestamp(SENTIMENT_END_DATE)
+    before = len(df)
+    df = df[df[DATE_COL] <= cutoff].reset_index(drop=True)
+    print(f"  Truncated at sentiment end date {SENTIMENT_END_DATE}: {before} -> {len(df)}")
 
     # Drop rows with NaN from rolling calculations
     before = len(df)

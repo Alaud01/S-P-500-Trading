@@ -10,7 +10,7 @@ import torch
 from datetime import datetime, timedelta
 
 from config import (
-    RAW_PRICE_CSV, MODEL_DIR, LOG_DIR, DATE_COL, PRICE_COLS, VOLUME_COL,
+    RAW_PRICE_CSV, VIX_CSV, MODEL_DIR, LOG_DIR, DATE_COL, PRICE_COLS, VOLUME_COL,
     SEQUENCE_LENGTH, PREDICTION_HORIZON, SEED,
 )
 
@@ -21,6 +21,7 @@ xlstm = importlib.import_module('src.03_xlstm_model')
 causal_wavelet_denoise_series = wvd.causal_wavelet_denoise_series
 compute_all_features = fe.compute_all_features
 merge_macro_sentiment = fe.merge_macro_sentiment
+merge_vix = fe.merge_vix
 XLSTMTSModel = xlstm.XLSTMTSModel
 
 torch.manual_seed(SEED)
@@ -44,21 +45,22 @@ def get_latest_features():
 
     df = compute_all_features(df)
     df = merge_macro_sentiment(df)
+    df = merge_vix(df)
 
-    # Merge raw close for target (training uses raw close direction)
     raw_close = df_raw.set_index(DATE_COL)['Close']
     df = df.set_index(DATE_COL)
     df['raw_close'] = raw_close
     df = df.reset_index()
 
-    # Target: next-day raw close direction (consistent with training)
-    df["target_direction"] = (df["raw_close"].shift(-1) > df["raw_close"]).astype(int)
+    abs_cols_to_drop = ["Open", "High", "Low", "Close", "Volume"]
+    df.drop(columns=[c for c in abs_cols_to_drop if c in df.columns], inplace=True)
 
-    # Exclude raw columns from features
-    raw_cols = [c for c in df.columns if c.startswith('raw_') or c == 'target_direction']
-    feature_df = df.drop(columns=[c for c in raw_cols if c != 'target_direction' and c != DATE_COL])
-
-    df = df.dropna().reset_index(drop=True)
+    feature_cols = [c for c in df.columns if c not in [DATE_COL, 'raw_close', 'raw_open',
+                     'raw_high', 'raw_low', 'raw_daily_return', 'raw_log_return',
+                     'forward_1d_return', 'target_direction']]
+    df_features_only = df[feature_cols]
+    nan_rows = df_features_only.isna().any(axis=1)
+    df = df[~nan_rows].reset_index(drop=True)
 
     model_files = sorted(MODEL_DIR.glob("xlstm_fold_*.pt"))
     if not model_files:
@@ -72,7 +74,7 @@ def get_latest_features():
 
     # Exclude raw_* and target columns (not used as features during training)
     exclude_cols = {'target_direction', 'raw_close', 'raw_open', 'raw_high',
-                    'raw_low', 'raw_daily_return', 'raw_log_return'}
+                    'raw_low', 'raw_daily_return', 'raw_log_return', 'forward_1d_return'}
     available = [c for c in feature_cols if c in df.columns and c not in exclude_cols]
     X_all = df[available].values.astype(np.float32)
 

@@ -17,10 +17,10 @@ import matplotlib.pyplot as plt
 from config import (
     FEATURES_CSV, MODEL_DIR, RESULT_DIR, DATE_COL, TARGET_COL,
     SEQUENCE_LENGTH, PREDICTION_HORIZON,
-    TRAIN_START_YEAR, VAL_WINDOW_YEARS, TEST_START_YEAR,
+    TRAIN_START_YEAR, VAL_WINDOW_YEARS, TEST_START_YEAR, TEST_GAP_DAYS,
     D_MODEL, N_BLOCKS, NUM_HEADS, EXPAND_FACTOR, DROPOUT,
     LEARNING_RATE, WEIGHT_DECAY, BATCH_SIZE, MAX_EPOCHS, PATIENCE,
-    GRAD_CLIP, SEED,
+    GRAD_CLIP, LABEL_SMOOTHING, SEED,
 )
 
 xlstm = importlib.import_module('src.03_xlstm_model')
@@ -35,7 +35,7 @@ def load_and_prepare():
     df = df.sort_values(DATE_COL).reset_index(drop=True)
 
     exclude = [DATE_COL, TARGET_COL, 'raw_close', 'raw_open', 'raw_high', 'raw_low',
-               'raw_daily_return', 'raw_log_return']
+               'raw_daily_return', 'raw_log_return', 'forward_1d_return']
     feature_cols = [c for c in df.columns if c not in exclude]
     X_all = df[feature_cols].values.astype(np.float32)
     y_all = df[TARGET_COL].values.astype(np.float32)
@@ -66,17 +66,39 @@ class EarlyStopping:
         self.best = -float('inf') if mode == 'max' else float('inf')
         self.counter = 0
         self.best_state = None
+        self.best_acc = -float('inf')
+        self.acc_counter = 0
 
-    def step(self, metric, model):
-        improved = (self.mode == 'max' and metric > self.best) or \
-                   (self.mode == 'min' and metric < self.best)
-        if improved:
-            self.best = metric
-            self.counter = 0
-            self.best_state = copy.deepcopy(model.state_dict())
+    def step(self, metric, model, val_acc=None):
+        if self.mode == 'val_loss_min_plus_acc':
+            loss_improved = metric < self.best
+            acc_improved = val_acc is not None and val_acc > self.best_acc
+            if loss_improved:
+                self.best = metric
+                self.counter = 0
+                self.best_state = copy.deepcopy(model.state_dict())
+            else:
+                self.counter += 1
+            if acc_improved:
+                self.best_acc = val_acc
+                self.acc_counter = 0
+                if not loss_improved:
+                    self.best_state = copy.deepcopy(model.state_dict())
+                    self.best = metric
+                    self.counter = 0
+            else:
+                self.acc_counter += 1
+            return self.counter >= self.patience and self.acc_counter >= self.patience
         else:
-            self.counter += 1
-        return self.counter >= self.patience
+            improved = (self.mode == 'max' and metric > self.best) or \
+                       (self.mode == 'min' and metric < self.best)
+            if improved:
+                self.best = metric
+                self.counter = 0
+                self.best_state = copy.deepcopy(model.state_dict())
+            else:
+                self.counter += 1
+            return self.counter >= self.patience
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
@@ -120,11 +142,11 @@ def evaluate(model, loader, criterion, device):
 
 
 def get_fold_ranges(dates, test_year):
-    train_mask = dates < pd.Timestamp(year=test_year - VAL_WINDOW_YEARS, month=1, day=1)
-    val_mask = (dates >= pd.Timestamp(year=test_year - VAL_WINDOW_YEARS, month=1, day=1)) & \
-               (dates < pd.Timestamp(year=test_year, month=1, day=1))
-    test_mask = (dates >= pd.Timestamp(year=test_year, month=1, day=1)) & \
-                (dates < pd.Timestamp(year=test_year + 1, month=1, day=1))
+    val_start = pd.Timestamp(year=test_year - VAL_WINDOW_YEARS, month=1, day=1)
+    train_mask = dates < val_start
+    val_mask = (dates >= val_start) & (dates < pd.Timestamp(year=test_year, month=1, day=1))
+    test_start = pd.Timestamp(year=test_year, month=1, day=1) + pd.Timedelta(days=TEST_GAP_DAYS)
+    test_mask = (dates >= test_start) & (dates < pd.Timestamp(year=test_year + 1, month=1, day=1))
     return train_mask, val_mask, test_mask
 
 
@@ -132,23 +154,56 @@ def train_fold(model, X_train, y_train, X_val, y_val, device, fold_label):
     n_pos = y_train.sum()
     n_neg = len(y_train) - n_pos
     pos_weight = torch.tensor([n_neg / (n_pos + 1e-8)]).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='mean')
+    ls = LABEL_SMOOTHING
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=10)
+        optimizer, mode='min', factor=0.5, patience=10)
 
     train_ds = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
     val_ds = TensorDataset(torch.from_numpy(X_val), torch.from_numpy(y_val))
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
 
-    stopper = EarlyStopping(patience=PATIENCE, mode='max')
+    stopper = EarlyStopping(patience=PATIENCE, mode='val_loss_min_plus_acc')
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
 
     for epoch in range(1, MAX_EPOCHS + 1):
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_acc, _, _ = evaluate(model, val_loader, criterion, device)
-        scheduler.step(val_acc)
+        model.train()
+        total_loss, total_correct, total_samples = 0.0, 0, 0
+        for batch_x, batch_y in train_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            batch_y_smooth = batch_y * (1 - ls) + 0.5 * ls
+            optimizer.zero_grad()
+            logits = model(batch_x)
+            loss = criterion(logits, batch_y_smooth)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+            optimizer.step()
+            preds = (torch.sigmoid(logits) > 0.5).float()
+            total_loss += loss.item() * batch_x.size(0)
+            total_correct += (preds == batch_y).sum().item()
+            total_samples += batch_x.size(0)
+        train_loss = total_loss / total_samples
+        train_acc = total_correct / total_samples
+
+        model.eval()
+        total_loss_v, total_correct_v, total_samples_v = 0.0, 0, 0
+        with torch.no_grad():
+            for batch_x, batch_y in val_loader:
+                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                batch_y_smooth = batch_y * (1 - ls) + 0.5 * ls
+                logits = model(batch_x)
+                loss = criterion(logits, batch_y_smooth)
+                probs = torch.sigmoid(logits)
+                preds_v = (probs > 0.5).float()
+                total_loss_v += loss.item() * batch_x.size(0)
+                total_correct_v += (preds_v == batch_y).sum().item()
+                total_samples_v += batch_x.size(0)
+        val_loss = total_loss_v / total_samples_v
+        val_acc = total_correct_v / total_samples_v
+
+        scheduler.step(val_loss)
 
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
@@ -159,12 +214,12 @@ def train_fold(model, X_train, y_train, X_val, y_val, device, fold_label):
             print(f"    Epoch {epoch:3d}  |  t_loss={train_loss:.4f}  v_loss={val_loss:.4f}  "
                   f"t_acc={train_acc:.3f}  v_acc={val_acc:.3f}")
 
-        if stopper.step(val_acc, model):
-            print(f"    Early stopping at epoch {epoch}  (best val_acc={stopper.best:.4f})")
+        if stopper.step(val_loss, model, val_acc=val_acc):
+            print(f"    Early stopping at epoch {epoch}  (best val_loss={stopper.best:.4f})")
             break
 
     model.load_state_dict(stopper.best_state)
-    return model, history, stopper.best
+    return model, history, stopper.best_acc
 
 
 def main():

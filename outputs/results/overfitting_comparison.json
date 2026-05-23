@@ -1,0 +1,142 @@
+{
+  "old": {
+    "label": "OLD (overfitting-prone)",
+    "accuracy": 0.5360623781676414,
+    "mcc": 0.06941952449835125,
+    "avg_fold_acc": 0.5272546370877522,
+    "avg_train_val_gap": -0.007446242050435907,
+    "avg_val_test_drop": 0.0007411494883688974,
+    "avg_pred_std": 0.06832959316670895,
+    "strategy": {
+      "total_return": 0.4549439521194624,
+      "sharpe_ratio": 1.242041054060678,
+      "max_drawdown": -0.20497543948444902,
+      "win_rate": 0.5360623781676414,
+      "direction_accuracy": 0.5360623781676414
+    },
+    "fold_details": {
+      "fold_2021": {
+        "test_acc": 0.5677083333333334,
+        "val_acc": 0.49222797927461137,
+        "val_loss": 0.6240523380319072,
+        "train_val_gap": -0.0013259273969497554,
+        "val_test_drop": -0.075480354058722,
+        "pred_std": 0.01512078382074833,
+        "epochs": 11,
+        "best_epoch": 1
+      },
+      "fold_2022": {
+        "test_acc": 0.5602094240837696,
+        "val_acc": 0.4739583333333333,
+        "val_loss": 0.6202088395754496,
+        "train_val_gap": 0.03979342971321115,
+        "val_test_drop": -0.0862510907504363,
+        "pred_std": 0.11925740540027618,
+        "epochs": 21,
+        "best_epoch": 2
+      },
+      "fold_2023": {
+        "test_acc": 0.45384615384615384,
+        "val_acc": 0.6178010471204188,
+        "val_loss": 0.6025857625831484,
+        "train_val_gap": -0.06080622846756911,
+        "val_test_drop": 0.163954893274265,
+        "pred_std": 0.07061059027910233,
+        "epochs": 21,
+        "best_epoch": 11
+      }
+    },
+    "fold_accs": {
+      "fold_2021": 0.5677083333333334,
+      "fold_2022": 0.5602094240837696,
+      "fold_2023": 0.45384615384615384
+    }
+  },
+  "new": {
+    "label": "NEW (targeted fixes)",
+    "accuracy": 0.5247524752475248,
+    "mcc": 0.04645784930433615,
+    "avg_fold_acc": 0.5267537246533993,
+    "avg_train_val_gap": 0.024672633752811774,
+    "avg_val_test_drop": -0.042131511449249835,
+    "avg_pred_std": 0.059569595381617546,
+    "strategy": {
+      "total_return": -0.013925052115111608,
+      "sharpe_ratio": -0.03846962828541251,
+      "max_drawdown": -0.30835021539966134,
+      "win_rate": 0.5247524752475248,
+      "direction_accuracy": 0.5247524752475248
+    },
+    "fold_details": {
+      "fold_2021": {
+        "test_acc": 0.5263157894736842,
+        "val_acc": 0.4943820224719101,
+        "val_loss": 0.6329226361231858,
+        "train_val_gap": 0.02299249490260724,
+        "val_test_drop": -0.03193376700177408,
+        "pred_std": 0.021345969289541245,
+        "epochs": 20,
+        "best_epoch": 3
+      },
+      "fold_2022": {
+        "test_acc": 0.5106382978723404,
+        "val_acc": 0.47415730337078654,
+        "val_loss": 0.6240050834216428,
+        "train_val_gap": 0.015196161592434532,
+        "val_test_drop": -0.03648099450155384,
+        "pred_std": 0.02409118227660656,
+        "epochs": 17,
+        "best_epoch": 2
+      },
+      "fold_2023": {
+        "test_acc": 0.5433070866141733,
+        "val_acc": 0.4853273137697517,
+        "val_loss": 0.6284884702809508,
+        "train_val_gap": 0.03582924476339355,
+        "val_test_drop": -0.05797977284442157,
+        "pred_std": 0.13327163457870483,
+        "epochs": 37,
+        "best_epoch": 1
+      }
+    },
+    "fold_accs": {
+      "fold_2021": 0.5263157894736842,
+      "fold_2022": 0.5106382978723404,
+      "fold_2023": 0.5433070866141733
+    }
+  },
+  "old_config": {
+    "label": "OLD (overfitting-prone)",
+    "d_model": 48,
+    "n_blocks": 2,
+    "num_heads": 4,
+    "expand_factor": 2,
+    "dropout": 0.1,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 64,
+    "max_epochs": 100,
+    "patience": 10,
+    "early_stop_mode": "val_acc",
+    "label_smoothing": 0.0,
+    "use_pos_weight": true
+  },
+  "new_config": {
+    "label": "NEW (targeted fixes)",
+    "d_model": 48,
+    "n_blocks": 2,
+    "num_heads": 4,
+    "expand_factor": 2,
+    "dropout": 0.15,
+    "lr": 0.0005,
+    "weight_decay": 0.001,
+    "batch_size": 32,
+    "max_epochs": 100,
+    "patience": 15,
+    "early_stop_mode": "val_loss_min_plus_acc",
+    "label_smoothing": 0.08,
+    "use_pos_weight": true,
+    "val_window_years": 2,
+    "test_gap_days": 5
+  }
+}

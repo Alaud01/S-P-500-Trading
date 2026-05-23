@@ -1,84 +1,84 @@
 {
   "dca_monthly_amount": 10000,
-  "test_period": "2022-03-30 to 2025-12-31",
-  "n_trading_days": 703,
+  "test_period": "2021-04-05 to 2023-12-29",
+  "n_trading_days": 505,
   "using_raw_prices": true,
+  "methodology": "All metrics computed from daily return-on-deployed-capital series. Model returns = position * market_return. DCA returns = market gain on existing holdings / prev portfolio value (excludes cash inflows). B&H returns = raw market returns. DCA dollar metrics (ROI on invested capital) reported separately.",
   "long_short": {
-    "total_return": -0.25037194094470105,
-    "cagr": -0.09814488817392097,
-    "sharpe_ratio": -0.46188982964057407,
-    "max_drawdown": -0.4540447157871495,
-    "win_rate": 0.5106685633001422,
-    "n_periods": 703,
-    "n_years": 2.79,
-    "avg_daily_return": -0.0003412753770051777
+    "total_return": -0.014751074953916365,
+    "cagr": -0.007388334233831784,
+    "sharpe_ratio": 0.04955316881589626,
+    "max_drawdown": -0.2744525314127653,
+    "win_rate": 0.5346534653465347,
+    "n_periods": 505,
+    "n_years": 2.0,
+    "avg_daily_return": 3.555400007612414e-05
   },
   "long_flat": {
-    "total_return": -0.018258628909256558,
-    "cagr": -0.006583776817219,
-    "sharpe_ratio": 0.05054353050446973,
-    "max_drawdown": -0.32156482909473266,
-    "win_rate": 0.46088193456614507,
-    "n_periods": 703,
-    "n_years": 2.79,
-    "avg_daily_return": 3.54073903058846e-05
+    "total_return": 0.036435669055570274,
+    "cagr": 0.018018773443645886,
+    "sharpe_ratio": 0.1978606306121528,
+    "max_drawdown": -0.1672883147670647,
+    "win_rate": 0.3346534653465347,
+    "n_periods": 505,
+    "n_years": 2.0,
+    "avg_daily_return": 0.00010959997115019437
   },
   "dca": {
-    "total_return": 0.2731297995209041,
-    "cagr": 0.09041810302050757,
-    "sharpe_ratio": 0.5578404855410483,
-    "max_drawdown": -0.22279872676508913,
-    "win_rate": 0.5362731152204836,
-    "n_periods": 703,
-    "n_years": 2.79,
-    "avg_daily_return": 0.0004120901576169468,
-    "total_invested": 370000.0,
-    "final_portfolio_value": 519899.00007317105,
-    "total_gain": 149899.00007317105,
-    "total_return_pct": 40.5132432630192
+    "total_return": 0.16967515222258278,
+    "cagr": 0.08151521127656025,
+    "sharpe_ratio": 0.5007026209928674,
+    "max_drawdown": -0.25370640050406185,
+    "win_rate": 0.5138888888888888,
+    "n_periods": 504,
+    "n_years": 2.0,
+    "avg_daily_return": 0.00038523331093448743,
+    "total_invested": 250000.0,
+    "final_portfolio_value": 282604.596372236,
+    "total_gain": 32604.596372235974,
+    "return_on_invested_pct": 13.041838548894388,
+    "cagr_on_invested": 0.06308231657661034
   },
   "buy_hold": {
-    "total_return": 0.2731297995209041,
-    "cagr": 0.09041810302050757,
-    "sharpe_ratio": 0.5578404855410483,
-    "max_drawdown": -0.22279872676508913,
-    "win_rate": 0.5362731152204836,
-    "n_periods": 703,
-    "n_years": 2.79,
-    "avg_daily_return": 0.0004120901576169468
+    "total_return": 0.06185601493757398,
+    "cagr": 0.03040274784875585,
+    "sharpe_ratio": 0.25598749514275143,
+    "max_drawdown": -0.21943901331983023,
+    "win_rate": 0.5108910891089109,
+    "n_periods": 505,
+    "n_years": 2.0,
+    "avg_daily_return": 0.00018364594222426456
   },
   "yearly_breakdown": {
+    "2021": {
+      "long_short_return": -0.0225827656705615,
+      "long_flat_return": 0.0735734318802781,
+      "dca_return": 0.1237717360118269,
+      "buy_hold_return": 0.17622998055376682,
+      "long_short_sharpe": -0.19018593963161387,
+      "long_flat_sharpe": 0.9409570235324888,
+      "dca_sharpe": 1.2710825710487126,
+      "buy_hold_sharpe": 1.8523353805025207
+    },
     "2022": {
-      "long_short_return": -0.31138639841037363,
-      "long_flat_return": -0.24189470689947512,
-      "buy_hold_return": -0.17102081354175114,
-      "long_short_sharpe": -1.8552955417526322,
-      "long_flat_sharpe": -1.4687645688433233,
-      "buy_hold_sharpe": -0.8657647728468523
+      "long_short_return": -0.10542141268105398,
+      "long_flat_return": -0.12686148135528985,
+      "dca_return": -0.10518827575371337,
+      "buy_hold_return": -0.16551594713963536,
+      "long_short_sharpe": -0.46893889766494523,
+      "long_flat_sharpe": -0.8826246114984208,
+      "dca_sharpe": -0.43527009387181376,
+      "buy_hold_sharpe": -0.8413204225176878
     },
     "2023": {
-      "long_short_return": -0.16754720607237517,
-      "long_flat_return": -0.031563552738717915,
-      "buy_hold_return": 0.12348327047813701,
-      "long_short_sharpe": -2.861969926938403,
-      "long_flat_sharpe": -0.5796125751208728,
-      "buy_hold_sharpe": 1.9019321818074022
-    },
-    "2024": {
-      "long_short_return": 0.08089343436592666,
-      "long_flat_return": 0.1007138360148725,
-      "buy_hold_return": 0.12063279152671069,
-      "long_short_sharpe": 0.8430313005934968,
-      "long_flat_sharpe": 1.033515411100111,
-      "buy_hold_sharpe": 1.2056073949800272
-    },
-    "2025": {
-      "long_short_return": 0.2098394544815907,
-      "long_flat_return": 0.21484819413935008,
-      "buy_hold_return": 0.2198294680007531,
-      "long_short_sharpe": 1.3964640308497696,
-      "long_flat_sharpe": 1.4257467677799316,
-      "buy_hold_sharpe": 1.4530525993307428
+      "long_short_return": 0.12680166118175507,
+      "long_flat_return": 0.1056748928366098,
+      "dca_return": 0.16320294591035345,
+      "buy_hold_return": 0.08182084415292712,
+      "long_short_sharpe": 2.0032062478948216,
+      "long_flat_sharpe": 2.1275978058968645,
+      "dca_sharpe": 2.100913110198457,
+      "buy_hold_sharpe": 1.3346458463752664
     }
   }
 }

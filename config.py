@@ -13,6 +13,7 @@ for d in [MODEL_DIR, RESULT_DIR, LOG_DIR]:
 # -- Data --
 RAW_PRICE_CSV = DATA_DIR / "yfinance_sp500.csv"
 MERGED_CSV = DATA_DIR / "merged_sp500_dataset.csv"
+VIX_CSV = DATA_DIR / "vix.csv"
 FINAL_FEATURES_CSV = DATA_DIR / "final_dataset_for_modeling.csv"
 
 DENOISED_CSV = OUTPUT_DIR / "denoised_sp500.csv"
@@ -50,21 +51,24 @@ TARGET_COL = "target_direction"
 
 # Walk-forward chronological split
 TRAIN_START_YEAR = 2008
-VAL_WINDOW_YEARS = 1
-TEST_START_YEAR = 2022
+VAL_WINDOW_YEARS = 2
+TEST_START_YEAR = 2021
+SENTIMENT_END_DATE = "2024-03-04"
+TEST_GAP_DAYS = 5
 
 # -- xLSTM-TS Model --
 D_MODEL = 48
 N_BLOCKS = 2                       # alternating mLSTM / sLSTM blocks
 NUM_HEADS = 4
 EXPAND_FACTOR = 2                  # inner MLP ratio in mLSTM
-DROPOUT = 0.1
-LEARNING_RATE = 1e-3
-WEIGHT_DECAY = 1e-4
-BATCH_SIZE = 64
+DROPOUT = 0.15
+LEARNING_RATE = 5e-4
+WEIGHT_DECAY = 1e-3
+BATCH_SIZE = 32
 MAX_EPOCHS = 100
-PATIENCE = 10                      # early stopping
+PATIENCE = 15                      # early stopping
 GRAD_CLIP = 1.0
+LABEL_SMOOTHING = 0.08
 
 # -- Random Seed --
 SEED = 42

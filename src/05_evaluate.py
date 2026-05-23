@@ -69,11 +69,18 @@ def main():
         return pd.Timestamp(d).strftime('%Y-%m-%d')
 
     date_to_return = {}
-    for i in range(1, len(df_features)):
+    for i in range(len(df_features)):
         d = normalize_date(df_features.loc[i, DATE_COL])
-        raw_ret = df_features.loc[i, 'raw_daily_return'] if 'raw_daily_return' in df_features.columns else (
-            df_features.loc[i, 'daily_return'] if 'daily_return' in df_features.columns else 0.0)
-        date_to_return[d] = raw_ret
+        if 'forward_1d_return' in df_features.columns:
+            raw_ret = df_features.loc[i, 'forward_1d_return']
+        elif 'raw_daily_return' in df_features.columns:
+            raw_ret = df_features.loc[i, 'raw_daily_return']
+        elif 'daily_return' in df_features.columns:
+            raw_ret = df_features.loc[i, 'daily_return']
+        else:
+            raw_ret = 0.0
+        if pd.notna(raw_ret):
+            date_to_return[d] = raw_ret
 
     all_probs, all_labels, all_dates, all_returns = [], [], [], []
     fold_accs = []
