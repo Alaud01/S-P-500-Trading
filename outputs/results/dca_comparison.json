@@ -1,0 +1,84 @@
+{
+  "dca_monthly_amount": 10000,
+  "test_period": "2022-03-30 to 2025-12-31",
+  "n_trading_days": 703,
+  "using_raw_prices": true,
+  "long_short": {
+    "total_return": -0.25037194094470105,
+    "cagr": -0.09814488817392097,
+    "sharpe_ratio": -0.46188982964057407,
+    "max_drawdown": -0.4540447157871495,
+    "win_rate": 0.5106685633001422,
+    "n_periods": 703,
+    "n_years": 2.79,
+    "avg_daily_return": -0.0003412753770051777
+  },
+  "long_flat": {
+    "total_return": -0.018258628909256558,
+    "cagr": -0.006583776817219,
+    "sharpe_ratio": 0.05054353050446973,
+    "max_drawdown": -0.32156482909473266,
+    "win_rate": 0.46088193456614507,
+    "n_periods": 703,
+    "n_years": 2.79,
+    "avg_daily_return": 3.54073903058846e-05
+  },
+  "dca": {
+    "total_return": 0.2731297995209041,
+    "cagr": 0.09041810302050757,
+    "sharpe_ratio": 0.5578404855410483,
+    "max_drawdown": -0.22279872676508913,
+    "win_rate": 0.5362731152204836,
+    "n_periods": 703,
+    "n_years": 2.79,
+    "avg_daily_return": 0.0004120901576169468,
+    "total_invested": 370000.0,
+    "final_portfolio_value": 519899.00007317105,
+    "total_gain": 149899.00007317105,
+    "total_return_pct": 40.5132432630192
+  },
+  "buy_hold": {
+    "total_return": 0.2731297995209041,
+    "cagr": 0.09041810302050757,
+    "sharpe_ratio": 0.5578404855410483,
+    "max_drawdown": -0.22279872676508913,
+    "win_rate": 0.5362731152204836,
+    "n_periods": 703,
+    "n_years": 2.79,
+    "avg_daily_return": 0.0004120901576169468
+  },
+  "yearly_breakdown": {
+    "2022": {
+      "long_short_return": -0.31138639841037363,
+      "long_flat_return": -0.24189470689947512,
+      "buy_hold_return": -0.17102081354175114,
+      "long_short_sharpe": -1.8552955417526322,
+      "long_flat_sharpe": -1.4687645688433233,
+      "buy_hold_sharpe": -0.8657647728468523
+    },
+    "2023": {
+      "long_short_return": -0.16754720607237517,
+      "long_flat_return": -0.031563552738717915,
+      "buy_hold_return": 0.12348327047813701,
+      "long_short_sharpe": -2.861969926938403,
+      "long_flat_sharpe": -0.5796125751208728,
+      "buy_hold_sharpe": 1.9019321818074022
+    },
+    "2024": {
+      "long_short_return": 0.08089343436592666,
+      "long_flat_return": 0.1007138360148725,
+      "buy_hold_return": 0.12063279152671069,
+      "long_short_sharpe": 0.8430313005934968,
+      "long_flat_sharpe": 1.033515411100111,
+      "buy_hold_sharpe": 1.2056073949800272
+    },
+    "2025": {
+      "long_short_return": 0.2098394544815907,
+      "long_flat_return": 0.21484819413935008,
+      "buy_hold_return": 0.2198294680007531,
+      "long_short_sharpe": 1.3964640308497696,
+      "long_flat_sharpe": 1.4257467677799316,
+      "buy_hold_sharpe": 1.4530525993307428
+    }
+  }
+}
