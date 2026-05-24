@@ -19,6 +19,7 @@ np.random.seed(SEED)
 
 def compute_all_features(df):
     """All features computed on denoised OHLCV — all in STATIONARY form (ratios/percentages)."""
+    df[VOLUME_COL] = df[VOLUME_COL].replace([np.inf, -np.inf], np.nan).ffill()
     o, h, l, c, v = df["Open"], df["High"], df["Low"], df["Close"], df["Volume"]
     epsilon = 1e-10
 

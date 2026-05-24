@@ -5,6 +5,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import json
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
@@ -86,7 +88,11 @@ def main():
     fold_accs = []
     seen_dates = set()
 
-    for fold_name in sorted(results.keys()):
+    def fold_sort_key(name):
+        metadata = results[name].get('metadata', {})
+        return metadata.get('retrain_date', name)
+
+    for fold_name in sorted(results.keys(), key=fold_sort_key):
         fold_data = results[fold_name]
         fold_probs = fold_data['preds']
         fold_labels = fold_data['labels']
@@ -102,7 +108,7 @@ def main():
             ret = date_to_return.get(d, 0.0)
             all_returns.append(ret)
 
-        print(f"  {fold_name}:  test_acc={fold_data['test_acc']:.4f}  val_acc={fold_data['val_acc']:.4f}")
+        print(f"  {fold_name}:  window_acc={fold_data['test_acc']:.4f}  val_acc={fold_data['val_acc']:.4f}")
         fold_accs.append(fold_data['test_acc'])
 
     probs = np.array(all_probs)
@@ -120,8 +126,9 @@ def main():
     print(f"  Recall:            {rec:.4f}")
     print(f"  F1 Score:          {f1:.4f}")
     print(f"  MCC:               {mcc:.4f}")
-    print(f"  Avg fold acc:      {np.mean(fold_accs):.4f}")
+    print(f"  Avg window acc:    {np.mean(fold_accs):.4f}")
     print(f"  Total unique predictions: {len(labels)}")
+    print(f"  Prediction period: {min(all_dates)} to {max(all_dates)}")
 
     print(f"\n  Classification Report:")
     print(classification_report(labels, preds, target_names=['Down (0)', 'Up (1)']))
@@ -165,13 +172,13 @@ def main():
     axes[1, 0].set_xlabel('Trade')
     axes[1, 0].set_ylabel('Drawdown')
 
-    fold_names = [f"fold_{y}" for y in sorted([int(k.split('_')[1]) for k in results.keys()])]
+    fold_names = sorted(results.keys(), key=fold_sort_key)
     fold_acc_vals = [results[k]['test_acc'] for k in fold_names]
     axes[1, 1].bar(fold_names, fold_acc_vals, color='steelblue')
     axes[1, 1].axhline(y=0.5, color='red', linestyle='--')
-    axes[1, 1].set_title('Accuracy by Test Year')
+    axes[1, 1].set_title('Accuracy by Retrain Window')
     axes[1, 1].set_ylabel('Accuracy')
-    axes[1, 1].tick_params(axis='x', rotation=45)
+    axes[1, 1].tick_params(axis='x', rotation=60)
 
     plt.tight_layout()
     plt.savefig(RESULT_DIR / "evaluation_summary.png", dpi=150, bbox_inches='tight')
@@ -183,7 +190,7 @@ def main():
         'recall': float(rec),
         'f1': float(f1),
         'mcc': float(mcc),
-        'avg_fold_acc': float(np.mean(fold_accs)),
+        'avg_window_acc': float(np.mean(fold_accs)),
         'fold_accs': {k: v for k, v in zip(fold_names, fold_acc_vals)},
         'strategy': strategy,
     }

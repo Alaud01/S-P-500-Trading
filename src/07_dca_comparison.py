@@ -5,6 +5,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import json
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from config import RESULT_DIR, FEATURES_CSV, DATE_COL, RAW_PRICE_CSV
@@ -42,7 +44,11 @@ def load_model_predictions():
     all_probs, all_labels, all_dates, all_returns, all_closes = [], [], [], [], []
     seen_dates = set()
 
-    for fold_name in sorted(results.keys()):
+    def fold_sort_key(name):
+        metadata = results[name].get('metadata', {})
+        return metadata.get('retrain_date', name)
+
+    for fold_name in sorted(results.keys(), key=fold_sort_key):
         fold_data = results[fold_name]
         fold_probs = fold_data['preds']
         fold_labels = fold_data['labels']
@@ -115,14 +121,12 @@ def simulate_dca(dates, daily_returns, closes):
         portfolio_values.append(portfolio_value)
         invested_values.append(total_invested)
 
-        if idx == 0:
-            market_returns.append(0.0)
+        market_gain = portfolio_value - prev_portfolio - new_investment
+        capital_at_risk = prev_portfolio if prev_portfolio > 0 else new_investment
+        if capital_at_risk > 0:
+            market_returns.append(market_gain / capital_at_risk)
         else:
-            market_gain = portfolio_value - prev_portfolio - new_investment
-            if prev_portfolio > 0:
-                market_returns.append(market_gain / prev_portfolio)
-            else:
-                market_returns.append(0.0)
+            market_returns.append(0.0)
 
         prev_portfolio = portfolio_value
 
@@ -190,10 +194,7 @@ def main():
     dca_market_returns, dca_portfolio, dca_invested = simulate_dca(dates, daily_returns, closes)
     bh_returns = daily_returns.copy()
 
-    # DCA market returns start at index 0 with 0.0 (no prior capital).
-    # For cumprod/compounding, start from index 1 where we have the first
-    # actual market return.
-    dca_returns = dca_market_returns[1:]
+    dca_returns = dca_market_returns
 
     # --- Compute metrics ---
     ls_metrics = compute_metrics(ls_returns)
@@ -249,7 +250,7 @@ def main():
     ax1.plot(dates, ls_cum * 100, label='Model Long/Short', linewidth=1.0, alpha=0.9)
     ax1.plot(dates, lf_cum * 100, label='Model Long/Flat', linewidth=1.0, alpha=0.9)
     ax1.plot(dates, bh_cum * 100, label='Buy & Hold', linewidth=1.0, alpha=0.9)
-    ax1.plot(dates[1:], dca_cum * 100, label=f'DCA (${DCA_MONTHLY_AMOUNT/1000:.0f}k/mo)', linewidth=1.0, alpha=0.9)
+    ax1.plot(dates, dca_cum * 100, label=f'DCA (${DCA_MONTHLY_AMOUNT/1000:.0f}k/mo)', linewidth=1.0, alpha=0.9)
     ax1.axhline(y=0, color='red', linestyle='--', alpha=0.5)
     ax1.set_title('Cumulative Returns (%)')
     ax1.set_ylabel('Return (%)')
@@ -285,11 +286,11 @@ def main():
     ax3.fill_between(dates, ls_dd * 100, 0, alpha=0.3, color='blue', label='Long/Short')
     ax3.fill_between(dates, lf_dd * 100, 0, alpha=0.3, color='orange', label='Long/Flat')
     ax3.fill_between(dates, bh_dd * 100, 0, alpha=0.3, color='green', label='Buy & Hold')
-    ax3.fill_between(dates[1:], dca_dd * 100, 0, alpha=0.3, color='purple', label='DCA')
+    ax3.fill_between(dates, dca_dd * 100, 0, alpha=0.3, color='purple', label='DCA')
     ax3.plot(dates, ls_dd * 100, linewidth=0.5, alpha=0.7, color='blue')
     ax3.plot(dates, lf_dd * 100, linewidth=0.5, alpha=0.7, color='orange')
     ax3.plot(dates, bh_dd * 100, linewidth=0.5, alpha=0.7, color='green')
-    ax3.plot(dates[1:], dca_dd * 100, linewidth=0.5, alpha=0.7, color='purple')
+    ax3.plot(dates, dca_dd * 100, linewidth=0.5, alpha=0.7, color='purple')
     ax3.set_title('Drawdown (%)')
     ax3.set_ylabel('Drawdown (%)')
     ax3.legend(fontsize=8)
@@ -313,7 +314,7 @@ def main():
         ax4.plot(dates, ls_rs, label='Long/Short', linewidth=0.8, alpha=0.8)
         ax4.plot(dates, lf_rs, label='Long/Flat', linewidth=0.8, alpha=0.8)
         ax4.plot(dates, bh_rs, label='Buy & Hold', linewidth=0.8, alpha=0.8)
-        ax4.plot(dates[1:], dca_rs.values, label='DCA', linewidth=0.8, alpha=0.8, color='purple')
+        ax4.plot(dates, dca_rs.values, label='DCA', linewidth=0.8, alpha=0.8, color='purple')
         ax4.axhline(y=0, color='red', linestyle='--', alpha=0.5)
     ax4.set_title(f'Rolling {window}-day Sharpe Ratio')
     ax4.set_ylabel('Sharpe Ratio')
@@ -342,7 +343,7 @@ def main():
     ax_pg.plot(dates, ls_nav, label=f'Long/Short (final: ${ls_nav[-1]:,.0f})', linewidth=1.0, color='blue')
     ax_pg.plot(dates, lf_nav, label=f'Long/Flat (final: ${lf_nav[-1]:,.0f})', linewidth=1.0, color='orange')
     ax_pg.plot(dates, bh_nav, label=f'B&H (final: ${bh_nav[-1]:,.0f})', linewidth=1.0, color='green')
-    ax_pg.plot(dates[1:], dca_nav_grow, label=f'DCA (final: ${dca_nav_grow[-1]:,.0f})', linewidth=1.0, color='purple')
+    ax_pg.plot(dates, dca_nav_grow, label=f'DCA (final: ${dca_nav_grow[-1]:,.0f})', linewidth=1.0, color='purple')
     ax_pg.axhline(y=initial_capital, color='gray', linestyle='--', alpha=0.5, label='Initial Capital')
     ax_pg.set_title(f'Portfolio Growth — Starting Capital ${initial_capital:,}', fontsize=13, fontweight='bold')
     ax_pg.set_ylabel('Portfolio Value ($)')
@@ -465,7 +466,6 @@ def main():
         yr_ls = ls_returns[si:ei]
         yr_lf = lf_returns[si:ei]
         yr_bh = bh_returns[si:ei]
-        # dca_returns starts at index 1 of dates, so offset by 1
         yr_dca = dca_returns[si:ei]
 
         ls_yr = np.prod(1 + yr_ls) - 1

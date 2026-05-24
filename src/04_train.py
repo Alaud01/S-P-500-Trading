@@ -12,12 +12,14 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from config import (
     FEATURES_CSV, MODEL_DIR, RESULT_DIR, DATE_COL, TARGET_COL,
     SEQUENCE_LENGTH, PREDICTION_HORIZON,
-    TRAIN_START_YEAR, VAL_WINDOW_YEARS, TEST_START_YEAR, TEST_GAP_DAYS,
+    TRAIN_START_YEAR, VAL_WINDOW_YEARS, TEST_START_YEAR,
     D_MODEL, N_BLOCKS, NUM_HEADS, EXPAND_FACTOR, DROPOUT,
     LEARNING_RATE, WEIGHT_DECAY, BATCH_SIZE, MAX_EPOCHS, PATIENCE,
     GRAD_CLIP, LABEL_SMOOTHING, SEED,
@@ -39,7 +41,7 @@ def load_and_prepare():
     feature_cols = [c for c in df.columns if c not in exclude]
     X_all = df[feature_cols].values.astype(np.float32)
     y_all = df[TARGET_COL].values.astype(np.float32)
-    dates = df[DATE_COL].values
+    dates = pd.DatetimeIndex(df[DATE_COL])
 
     assert not np.isnan(X_all).any(), "NaN values in features"
     assert not np.isinf(X_all).any(), "Inf values in features"
@@ -47,16 +49,47 @@ def load_and_prepare():
     return X_all, y_all, dates, feature_cols
 
 
-def build_sequences(X, y):
+def get_label_known_dates(dates):
     """
-    (N, F) -> (N-S+1, S, F) input, (N-S+1,) target.
-    Target is direction for next day after the sequence.
+    A row dated T has a 1-day-forward label that is only known after the
+    next available trading close. Generalized to PREDICTION_HORIZON rows.
+    """
+    if PREDICTION_HORIZON != 1:
+        raise ValueError("Walk-forward label availability currently expects PREDICTION_HORIZON=1")
+    label_known = pd.Series(dates).shift(-PREDICTION_HORIZON)
+    return pd.DatetimeIndex(label_known)
+
+
+def build_sequences_for_indices(X, y, target_indices):
+    """
+    Build sequences whose prediction date is the target row itself.
+    For target index i, features are X[i-SEQUENCE_LENGTH+1 : i+1] and label is y[i].
     """
     X_seq, y_seq = [], []
-    for i in range(len(X) - SEQUENCE_LENGTH - PREDICTION_HORIZON + 1):
-        X_seq.append(X[i:i + SEQUENCE_LENGTH])
-        y_seq.append(y[i + SEQUENCE_LENGTH + PREDICTION_HORIZON - 1])
-    return np.array(X_seq, dtype=np.float32), np.array(y_seq, dtype=np.float32)
+    used_indices = []
+    for idx in target_indices:
+        start = idx - SEQUENCE_LENGTH + 1
+        if start < 0:
+            continue
+        X_seq.append(X[start:idx + 1])
+        y_seq.append(y[idx])
+        used_indices.append(idx)
+    return (
+        np.array(X_seq, dtype=np.float32),
+        np.array(y_seq, dtype=np.float32),
+        np.array(used_indices, dtype=np.int64),
+    )
+
+
+def build_prediction_sequences(X, target_indices):
+    X_seq, used_indices = [], []
+    for idx in target_indices:
+        start = idx - SEQUENCE_LENGTH + 1
+        if start < 0:
+            continue
+        X_seq.append(X[start:idx + 1])
+        used_indices.append(idx)
+    return np.array(X_seq, dtype=np.float32), np.array(used_indices, dtype=np.int64)
 
 
 class EarlyStopping:
@@ -141,13 +174,38 @@ def evaluate(model, loader, criterion, device):
            np.array(all_probs), np.array(all_labels)
 
 
-def get_fold_ranges(dates, test_year):
-    val_start = pd.Timestamp(year=test_year - VAL_WINDOW_YEARS, month=1, day=1)
-    train_mask = dates < val_start
-    val_mask = (dates >= val_start) & (dates < pd.Timestamp(year=test_year, month=1, day=1))
-    test_start = pd.Timestamp(year=test_year, month=1, day=1) + pd.Timedelta(days=TEST_GAP_DAYS)
-    test_mask = (dates >= test_start) & (dates < pd.Timestamp(year=test_year + 1, month=1, day=1))
-    return train_mask, val_mask, test_mask
+def get_retrain_indices(dates):
+    test_start = pd.Timestamp(year=TEST_START_YEAR, month=1, day=1)
+    test_indices = np.flatnonzero(dates >= test_start)
+    if len(test_indices) == 0:
+        raise ValueError(f"No dates found at or after TEST_START_YEAR={TEST_START_YEAR}")
+
+    test_frame = pd.DataFrame({
+        'idx': test_indices,
+        'quarter': dates[test_indices].to_period('Q'),
+    })
+    retrain_indices = test_frame.groupby('quarter', sort=True)['idx'].first().to_numpy()
+    return test_indices, retrain_indices
+
+
+def get_train_val_indices(dates, label_known_dates, retrain_date):
+    eligible = (
+        (dates >= pd.Timestamp(year=TRAIN_START_YEAR, month=1, day=1)) &
+        pd.notna(label_known_dates) &
+        (label_known_dates <= retrain_date)
+    )
+    val_start = retrain_date - pd.DateOffset(years=VAL_WINDOW_YEARS)
+    train_indices = np.flatnonzero(eligible & (dates < val_start))
+    val_indices = np.flatnonzero(eligible & (dates >= val_start) & (dates < retrain_date))
+
+    if len(train_indices) == 0:
+        raise ValueError(f"No training rows available for retrain date {retrain_date.date()}")
+    if len(val_indices) == 0:
+        raise ValueError(f"No validation rows available for retrain date {retrain_date.date()}")
+
+    assert label_known_dates[train_indices].max() <= retrain_date
+    assert label_known_dates[val_indices].max() <= retrain_date
+    return train_indices, val_indices, val_start
 
 
 def train_fold(model, X_train, y_train, X_val, y_val, device, fold_label):
@@ -224,7 +282,7 @@ def train_fold(model, X_train, y_train, X_val, y_val, device, fold_label):
 
 def main():
     print("=" * 60)
-    print(" Step 4 — Walk-Forward Training")
+    print(" Step 4 — Leakage-Free Daily Walk-Forward Training")
     print("=" * 60)
 
     device = torch.device("mps" if torch.backends.mps.is_available() else
@@ -232,50 +290,72 @@ def main():
     print(f"  Using device: {device}")
 
     X_all, y_all, dates, feature_cols = load_and_prepare()
+    label_known_dates = get_label_known_dates(dates)
     print(f"  Loaded features: {X_all.shape}  ({len(feature_cols)} features)")
     print(f"  Date range: {dates[0]} — {dates[-1]}")
     print(f"  Target distribution: 1={y_all.sum():.0f}  0={len(y_all)-y_all.sum():.0f}")
     print()
 
-    available_years = sorted(set(pd.DatetimeIndex(dates).year))
-    test_years = [y for y in available_years if y >= TEST_START_YEAR]
+    test_indices, retrain_indices = get_retrain_indices(dates)
+    print(f"  Backtest dates: {dates[test_indices[0]].date()} to {dates[test_indices[-1]].date()}")
+    print(f"  Daily predictions: {len(test_indices)}")
+    print(f"  Quarterly retrains: {len(retrain_indices)}")
 
     all_fold_results = {}
-    for test_year in test_years:
-        print(f"--- Fold: Test Year {test_year} ---")
-
-        train_mask, val_mask, test_mask = get_fold_ranges(dates, test_year)
-
-        X_train_raw = X_all[train_mask]
-        y_train_raw = y_all[train_mask]
-        X_val_raw = X_all[val_mask]
-        y_val_raw = y_all[val_mask]
-        X_test_raw = X_all[test_mask]
-        y_test_raw = y_all[test_mask]
-        dates_test = dates[test_mask]
-
-        print(f"  Sizes:  train={len(X_train_raw)}  val={len(X_val_raw)}  test={len(X_test_raw)}")
-
-        scaler = StandardScaler()
-        X_train_s = scaler.fit_transform(X_train_raw)
-        X_val_s = scaler.transform(X_val_raw)
-        X_test_s = scaler.transform(X_test_raw)
-
-        X_train_seq, y_train_seq = build_sequences(X_train_s, y_train_raw)
-        X_val_seq, y_val_seq = build_sequences(X_val_s, y_val_raw)
-        X_test_seq, y_test_seq = build_sequences(X_test_s, y_test_raw)
-
-        if len(X_test_seq) < 10:
-            print(f"  Skipping fold {test_year} — insufficient test sequences ({len(X_test_seq)})")
+    retrain_boundaries = list(retrain_indices) + [test_indices[-1] + 1]
+    for fold_no, retrain_idx in enumerate(retrain_indices):
+        retrain_date = dates[retrain_idx]
+        next_boundary = retrain_boundaries[fold_no + 1]
+        pred_indices = test_indices[(test_indices >= retrain_idx) & (test_indices < next_boundary)]
+        if len(pred_indices) == 0:
             continue
 
+        quarter = retrain_date.to_period('Q')
+        fold_name = f"retrain_{quarter.year}_Q{quarter.quarter}"
+        print(f"--- {fold_name}: retrain on {retrain_date.date()} ---")
+
+        train_indices, val_indices, val_start = get_train_val_indices(
+            dates, label_known_dates, retrain_date)
+
+        print(
+            f"  Split: train={len(train_indices)} "
+            f"({dates[train_indices[0]].date()} to {dates[train_indices[-1]].date()}), "
+            f"val={len(val_indices)} "
+            f"({dates[val_indices[0]].date()} to {dates[val_indices[-1]].date()}), "
+            f"predict={len(pred_indices)} "
+            f"({dates[pred_indices[0]].date()} to {dates[pred_indices[-1]].date()})"
+        )
+
+        scaler = StandardScaler()
+        scaler.fit(X_all[train_indices])
+        assert scaler.n_samples_seen_ == len(train_indices), "Scaler fit row count mismatch"
+
+        X_all_s = scaler.transform(X_all)
+        X_train_seq, y_train_seq, train_seq_indices = build_sequences_for_indices(
+            X_all_s, y_all, train_indices)
+        X_val_seq, y_val_seq, val_seq_indices = build_sequences_for_indices(
+            X_all_s, y_all, val_indices)
+        X_test_seq, test_seq_indices = build_prediction_sequences(X_all_s, pred_indices)
+        y_test_seq = y_all[test_seq_indices]
+
+        if len(X_train_seq) == 0 or len(X_val_seq) == 0:
+            raise ValueError(f"Insufficient train/val sequences for {fold_name}")
+        if len(X_test_seq) != len(pred_indices):
+            missing = len(pred_indices) - len(X_test_seq)
+            raise ValueError(f"{fold_name} missing {missing} prediction sequences")
+
         print(f"  Sequences: train={X_train_seq.shape}  val={X_val_seq.shape}  test={X_test_seq.shape}")
+        assert dates[test_seq_indices].max() <= dates[pred_indices[-1]]
+        for pred_idx in test_seq_indices:
+            context_start = pred_idx - SEQUENCE_LENGTH + 1
+            context_dates = dates[context_start:pred_idx + 1]
+            assert context_dates.max() <= dates[pred_idx], "Prediction context uses future data"
 
         n_features = X_all.shape[1]
         model = XLSTMTSModel(n_features=n_features).to(device)
 
         model, history, best_val = train_fold(
-            model, X_train_seq, y_train_seq, X_val_seq, y_val_seq, device, f"fold_{test_year}")
+            model, X_train_seq, y_train_seq, X_val_seq, y_val_seq, device, fold_name)
 
         _, test_acc, test_probs, test_labels = evaluate(
             model, DataLoader(
@@ -283,21 +363,25 @@ def main():
                 batch_size=BATCH_SIZE, shuffle=False),
             nn.BCEWithLogitsLoss(), device)
 
-        print(f"  Test accuracy: {test_acc:.4f}")
+        print(f"  Window accuracy: {test_acc:.4f}")
 
-        fold_name = f"fold_{test_year}"
         torch.save({
             'model_state': model.state_dict(),
             'scaler': scaler,
             'feature_cols': feature_cols,
-            'test_year': test_year,
+            'retrain_date': str(retrain_date.date()),
+            'prediction_start': str(dates[test_seq_indices[0]].date()),
+            'prediction_end': str(dates[test_seq_indices[-1]].date()),
+            'train_start': str(dates[train_indices[0]].date()),
+            'train_end': str(dates[train_indices[-1]].date()),
+            'val_start': str(dates[val_indices[0]].date()),
+            'val_end': str(dates[val_indices[-1]].date()),
+            'label_cutoff': str(retrain_date.date()),
+            'scaler_fit_rows': int(len(train_indices)),
             'val_acc': best_val,
         }, MODEL_DIR / f"xlstm_{fold_name}.pt")
 
-        # We need dates aligned with test_seq predictions;
-        # each prediction corresponds to the next day after sequence end
-        seq_offset = SEQUENCE_LENGTH + PREDICTION_HORIZON - 1
-        pred_dates = dates_test[seq_offset:]
+        pred_dates = dates[test_seq_indices]
 
         all_fold_results[fold_name] = {
             'dates': [str(d) for d in pred_dates],
@@ -305,6 +389,20 @@ def main():
             'labels': test_labels.tolist(),
             'test_acc': float(test_acc),
             'val_acc': float(best_val),
+            'metadata': {
+                'retrain_date': str(retrain_date.date()),
+                'prediction_start': str(pred_dates[0].date()),
+                'prediction_end': str(pred_dates[-1].date()),
+                'train_start': str(dates[train_indices[0]].date()),
+                'train_end': str(dates[train_indices[-1]].date()),
+                'val_start': str(dates[val_indices[0]].date()),
+                'val_end': str(dates[val_indices[-1]].date()),
+                'label_cutoff': str(retrain_date.date()),
+                'validation_policy': f'rolling_prior_{VAL_WINDOW_YEARS}y',
+                'scaler_fit_rows': int(len(train_indices)),
+                'train_sequence_rows': int(len(train_seq_indices)),
+                'val_sequence_rows': int(len(val_seq_indices)),
+            },
             'history': {k: [float(x) for x in v] for k, v in history.items()},
         }
 
@@ -312,13 +410,13 @@ def main():
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
         axes[0].plot(history['train_loss'], label='train')
         axes[0].plot(history['val_loss'], label='val')
-        axes[0].set_title(f'Fold {test_year} — Loss')
+        axes[0].set_title(f'{fold_name} — Loss')
         axes[0].legend()
 
         axes[1].plot(history['train_acc'], label='train')
         axes[1].plot(history['val_acc'], label='val')
         axes[1].axhline(y=0.5, color='gray', linestyle='--')
-        axes[1].set_title(f'Fold {test_year} — Accuracy')
+        axes[1].set_title(f'{fold_name} — Accuracy')
         axes[1].legend()
 
         plt.tight_layout()
@@ -328,7 +426,13 @@ def main():
     with open(RESULT_DIR / "fold_results.json", "w") as f:
         json.dump(all_fold_results, f, indent=2)
 
-    print(f"\nAll {len(test_years)} folds complete. Results saved to {RESULT_DIR}/fold_results.json")
+    all_dates = [pd.Timestamp(d) for fold in all_fold_results.values() for d in fold['dates']]
+    assert min(all_dates) == pd.Timestamp('2021-01-04'), "First prediction date is not 2021-01-04"
+    assert max(all_dates) == dates[test_indices[-1]], "Last prediction date does not match feature end"
+    assert len(set(all_dates)) == len(test_indices), "Prediction dates contain gaps or duplicates"
+
+    print(f"\nAll {len(all_fold_results)} retrain windows complete. Results saved to {RESULT_DIR}/fold_results.json")
+    print(f"  Prediction coverage: {min(all_dates).date()} to {max(all_dates).date()} ({len(all_dates)} trading days)")
     print("Training complete.\n")
 
 

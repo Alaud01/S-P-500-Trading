@@ -62,7 +62,9 @@ def get_latest_features():
     nan_rows = df_features_only.isna().any(axis=1)
     df = df[~nan_rows].reset_index(drop=True)
 
-    model_files = sorted(MODEL_DIR.glob("xlstm_fold_*.pt"))
+    model_files = sorted(MODEL_DIR.glob("xlstm_retrain_*.pt"))
+    if not model_files:
+        model_files = sorted(MODEL_DIR.glob("xlstm_fold_*.pt"))
     if not model_files:
         raise FileNotFoundError(f"No trained model found in {MODEL_DIR}")
     model_path = model_files[-1]

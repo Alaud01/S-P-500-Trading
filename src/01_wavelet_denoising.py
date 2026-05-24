@@ -5,6 +5,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import pandas as pd
 import pywt
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from config import (
     RAW_PRICE_CSV, DENOISED_CSV, RESULT_DIR,
