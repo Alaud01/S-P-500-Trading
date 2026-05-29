@@ -222,9 +222,4 @@ All return series are computed on the same basis (daily return on capital at ris
 3. **Walk-forward retraining** — Quarterly retrain prevents stale models and simulates production use.
 4. **Binary direction target** — The target uses raw (undenoised) close prices, since we trade actual market direction.
 5. **Publication lag adjustment** — Macro indicators are shifted to reflect when data becomes available, not when the period ends.
-
----
-
-## License
-
-Private repository. All rights reserved.
+   
