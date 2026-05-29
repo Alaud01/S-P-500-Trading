@@ -1,6 +1,6 @@
 # S&P 500 Directional Trading with xLSTM (Experiment ONLY)
 
-Precaution: This repo is only an experiment fueled by my curiosity please note the model's performance is basically negligible...
+PRECAUTION: This repo is only an experiment fueled by my curiosity please note the model's performance is basically negligible...
 
 A walk-forward ensemble system that predicts next-day S&P 500 direction (up/down) using an **xLSTM** architecture with **causal wavelet denoising**, multimodal feature engineering (technical, macro, sentiment, VIX), and quarterly-retrained walk-forward backtesting from 2021–2024.
 
